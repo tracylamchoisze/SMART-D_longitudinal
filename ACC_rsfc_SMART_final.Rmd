@@ -1,0 +1,3431 @@
+---
+title: "ACC_rsfc_SMART_final"
+author: "Tracy Lam"
+date: "2026-11-18"
+output: html_document
+---
+
+#library
+```{r}
+library(gamlss)
+library(writexl)
+library(tidyverse)
+library(reticulate)
+library(htmltools)
+library(brms)
+library(mgcv)
+library(nortest)
+library(afex)
+library(Hmisc)
+library(lme4)
+library(emmeans)
+library(Hmisc)
+library(corrplot)
+library(reshape2)
+library(ggpubr)
+library(dplyr)
+library('corrr')
+library("FactoMineR")
+library(readxl)
+library(stringr)
+library(moments)
+library(flextable)
+library(officer)
+
+#brain map needed packages
+library(ggseg)
+library(ggplot2)
+plot(dk)
+plot(aseg)
+library("scales")
+library(ggsegGlasser)
+library(sf)
+```
+#load data
+```{r}
+#pre-tx cortical seed
+rsFC_25 <- read.csv("~/SMART/corticalrsfc/pre-tx/bilateral_25_to_cortex_fc.csv")
+rsFC_PeEC <- read.csv("~/SMART/corticalrsfc/pre-tx/bilateral_PeEc_EC_H_PreS_to_cortex_fc.csv")
+rsFC_a24p32 <- read.csv("~/SMART/corticalrsfc/pre-tx/bilateral_a24_p32_to_cortex_fc.csv")
+rsFC_p24a32pr <- read.csv("~/SMART/corticalrsfc/pre-tx/bilateral_p24_a32pr_to_cortex_fc.csv")
+
+#post-tx cortical seed
+postrsFC_25 <- read.csv("~/SMART/corticalrsfc/post-tx/ses02_bilateral_25_to_cortex_fc.csv")
+postrsFC_PeEC <- read.csv("~/SMART/corticalrsfc/post-tx/ses02_bilateral_PeEc_EC_H_PreS_to_cortex_fc.csv")
+postrsFC_a24p32 <- read.csv("~/SMART/corticalrsfc/post-tx/ses02_bilateral_a24_p32_to_cortex_fc.csv")
+postrsFC_p24a32pr <- read.csv("~/SMART/corticalrsfc/post-tx/ses02_bilateral_p24_a32pr_to_cortex_fc.csv")
+
+smart_trtassign <- read.csv("~/SMART/cortical thickness/PRT/trt_assignment_090425.csv")
+smart_trt <- read.csv("~/SMART/cortical thickness/PRT/SMARTDataTx_9.4.25.csv")
+smart_madrs <- read.csv("~/Desktop/SMART/SMART_baseline_demog_MADRS.csv")
+smart_demog <- read.csv("~/SMART/SMART_Demog.csv")
+
+#combine data
+smart_prepostrsfc_25 <- bind_rows(rsFC_25 %>% mutate(timepoint = "pre"),
+  postrsFC_25 %>% mutate(timepoint = "post")) %>%
+  filter(mean_fd != 0) %>% 
+  left_join(SMART_NEO %>% select(study_id, age, sex), by = "study_id")
+
+smart_prepostrsfc_PeEC <- bind_rows(rsFC_PeEC %>% mutate(timepoint = "pre"),
+  postrsFC_PeEC %>% mutate(timepoint = "post")) %>%
+  filter(mean_fd != 0) %>% 
+  left_join(SMART_NEO %>% select(study_id, age, sex), by = "study_id")
+
+smart_prepostrsfc_a24p32 <- bind_rows(rsFC_a24p32 %>% mutate(timepoint = "pre"),
+  postrsFC_a24p32 %>% mutate(timepoint = "post")) %>%
+  filter(mean_fd != 0) %>% 
+  left_join(SMART_NEO %>% select(study_id, age, sex), by = "study_id")
+
+smart_prepostrsfc_p24a32pr <- bind_rows(rsFC_p24a32pr %>% mutate(timepoint = "pre"),
+  postrsFC_p24a32pr %>% mutate(timepoint = "post")) %>%
+  filter(mean_fd != 0) %>% 
+  left_join(SMART_NEO %>% select(study_id, age, sex), by = "study_id")
+
+smart_trt_clean <- smart_trt %>%
+  mutate(actual_treatment = case_when(str_detect(str_to_upper(Medication), "BUP") ~ "BUP",
+                                      str_detect(str_to_upper(Medication), "SER") ~ "SER", TRUE ~ NA_character_),
+         actual_treatment = factor(actual_treatment)) %>%
+  select(study_id, actual_treatment, Medication, Dose)
+
+smart_trtassign_clean <- smart_trtassign %>%
+  mutate(marker_treatment = case_when(BUP == 1 & SER == 0 ~ "BUP", BUP == 0 & SER == 1 ~ "SER", BUP == 1 & SER == 1 ~ "BOTH", BUP == 0 & SER == 0 ~ "NEITHER", TRUE ~ NA_character_),
+    marker_treatment = factor(marker_treatment)) %>%
+  select(study_id, BUP, SER, marker_treatment)
+
+smart_prepost_trt <- smart_madrs %>%
+  left_join(smart_trt_clean, by = "study_id") %>%
+  left_join(smart_trtassign_clean, by = "study_id") %>%
+  mutate(marker_matched = case_when(marker_treatment == "BUP" & actual_treatment == "BUP" ~ "matched",
+      marker_treatment == "SER" & actual_treatment == "SER" ~ "matched",
+      marker_treatment %in% c("BOTH", "NEITHER") ~ NA_character_,
+      is.na(marker_treatment) | is.na(actual_treatment) ~ NA_character_,
+      TRUE ~ "not_matched"),
+    marker_matched = factor(marker_matched, levels = c("not_matched", "matched")),
+    actual_treatment = factor(actual_treatment),
+    marker_treatment = factor(marker_treatment))%>% 
+  left_join(SMART_NEO %>% select(study_id, age, sex), by = "study_id")
+```
+#clean madrs
+```{r}
+# 1. Prepare data and calculate clinical outcomes
+smart_prepost_trt <- smart_prepost_trt %>%
+  filter(!is.na(MADRS_w0)) %>%
+  mutate(
+    percent_change = (MADRS_w0 - MADRS_w8) / MADRS_w0 * 100,
+    responder_status = factor(if_else(percent_change >= 50, "Responder", "Non-Responder"),
+                              levels = c("Non-Responder", "Responder")),
+    remission_status = factor(if_else(MADRS_w8 <= 10, "Remitter", "Non-Remitter"),
+                              levels = c("Non-Remitter", "Remitter")),
+    SHAPS_percent_change = (SHAPS_s1 - SHAPS_s9) / SHAPS_s1 * 100)
+
+# 2. Baseline descriptive statistics and clinical outcomes
+smart_prepost_trt %>%
+  summarise(
+    MADRS_mean = mean(MADRS_w0),
+    MADRS_sd = sd(MADRS_w0),
+    SHAPS_mean = mean(SHAPS_s3, na.rm = TRUE),
+    SHAPS_sd = sd(SHAPS_s3, na.rm = TRUE),
+    N_week8 = sum(!is.na(MADRS_w8)))
+
+responder_counts <- smart_prepost_trt %>%
+  count(responder_status) %>% filter(!is.na(responder_status))
+
+remission_counts <- smart_prepost_trt %>%
+  count(remission_status) %>% filter(!is.na(remission_status))
+
+smart_prepost_trt %>% count(marker_treatment, actual_treatment)
+
+# 3. MADRS change by marker and treatment group
+madrs_prs_table <- smart_prepost_trt %>%
+  mutate(
+    marker = toupper(trimws(marker_treatment)),
+    treatment = toupper(trimws(actual_treatment)),
+    treatment = recode(treatment, BUPROPION = "BUP", SERTRALINE = "SER"),
+    marker_label = recode(marker,
+      BOTH = "Bupropion +/Sertraline +",
+      BUP = "Bupropion +/Sertraline -",
+      SER = "Bupropion -/Sertraline +",
+      NEITHER = "Bupropion -/Sertraline -",
+      .default = NA_character_),
+    arm_group = paste(marker_label, "and", treatment, "treatment"),
+    MADRS_change = as.numeric(MADRS_w8) - as.numeric(MADRS_w0)) %>%
+  filter(!is.na(marker_label), treatment %in% c("BUP", "SER"),
+         !is.na(MADRS_change)) %>%
+  distinct(study_id, .keep_all = TRUE) %>%
+  group_by(arm_group) %>%
+  summarise(number_analyzed = n(),
+    mean_change = round(mean(MADRS_change), 2),
+    standard_deviation = round(sd(MADRS_change), 2),
+    .groups = "drop")
+
+madrs_prs_table
+
+# 4. Baseline MADRS severity among Week 8 completers
+severity_summary <- smart_prepost_trt %>%
+  filter(!is.na(MADRS_w8)) %>%
+  mutate(MADRS_severity = case_when(
+    MADRS_w0 <= 6 ~ "Normal/Minimal",
+    MADRS_w0 <= 19 ~ "Mild",
+    MADRS_w0 <= 34 ~ "Moderate",
+    MADRS_w0 <= 60 ~ "Severe")) %>%
+  count(MADRS_severity) %>%
+  mutate(Percent = round(100 * n / sum(n), 1),
+         `n (%)` = sprintf("%d (%.1f%%)", n, Percent))
+
+View(severity_summary)
+
+# 5. Baseline MADRS among Week 8 completers
+smart_prepost_trt %>%
+  filter(!is.na(MADRS_w8)) %>%
+  summarise(N = n(), Mean_MADRS = mean(MADRS_w0),
+            SD_MADRS = sd(MADRS_w0))
+
+responder_info <- smart_madrs %>%
+  filter(!is.na(MADRS_w0), !is.na(MADRS_w8)) %>%
+  mutate(percent_change = (MADRS_w0 - MADRS_w8) / MADRS_w0 * 100,
+    responder_status = if_else(percent_change >= 50, "Responder", "Non-Responder"),
+    responder_status = factor(responder_status, levels = c("Non-Responder", "Responder"))) %>%
+  select(study_id, percent_change, responder_status) %>%
+  distinct()
+
+remission_info <- smart_madrs %>%
+  filter(!is.na(MADRS_w0), !is.na(MADRS_w8)) %>%
+  mutate(percent_change = (MADRS_w0 - MADRS_w8) / MADRS_w0 * 100,
+    remission_status = if_else(MADRS_w8 <= 10, "Remitter","Non-Remitter"),
+    remission_status = factor(remission_status, levels = c("Non-Remitter", "Remitter"))) %>%
+  select(study_id, MADRS_w0, MADRS_w8, percent_change, remission_status) %>%
+  distinct(study_id, .keep_all = TRUE)
+```
+
+#demographics table
+```{r}
+# 1. Merge and prepare demographic data
+demog_data <- smart_prepost_trt %>%
+  filter(!is.na(responder_status)) %>%
+  distinct(study_id, .keep_all = TRUE) %>%
+  select(study_id, age, sex, MADRS_w0, SHAPS_s1, responder_status, remission_status) %>%
+  left_join(smart_scid %>% distinct(study_id, .keep_all = TRUE) %>%
+              select(study_id, age_of_onset, number_of_episodes), by = "study_id") %>%
+  left_join(smart_demog %>% distinct(record_id, .keep_all = TRUE),
+            by = c("study_id" = "record_id")) %>%
+  mutate(
+    sex = factor(sex, levels = c(0, 1), labels = c("Male", "Female")),
+    Employed = case_when(demog_emp_latn_adapted %in% 0:1 ~ 1,
+                         demog_emp_latn_adapted == 2 ~ 0),
+    Hispanic.Latino = na_if(Hispanic.Latino, 2),
+    race_count = rowSums(across(c(White, Black.African.American, Asian,
+      Native.American, Alaska.Native, Pacific.Islander, Some.other.race),
+      ~ .x == 1), na.rm = TRUE),
+    Multiracial = case_when(race_count > 1 ~ 1, race_count == 1 ~ 0))
+
+# 2. Formatting functions
+mean_sd <- function(x) if (sum(!is.na(x)) < 2) NA_character_ else
+  sprintf("%.2f (%.2f)", mean(x, na.rm = TRUE), sd(x, na.rm = TRUE))
+
+n_pct <- function(x, level = 1) if (all(is.na(x))) NA_character_ else
+  sprintf("%d (%.1f%%)", sum(x == level, na.rm = TRUE),
+          100 * mean(x == level, na.rm = TRUE))
+
+race_pct <- function(d, col)
+  n_pct(ifelse(d$race_count == 1, d[[col]],
+               ifelse(d$race_count > 1, 0, NA)), 1)
+
+# 3. Generate demographic summary
+summarize_demog <- function(d) {
+  continuous <- c("age", "MADRS_w0", "SHAPS_s1", "age_of_onset",
+                  "number_of_episodes", "demog_edu_yr_latn_adapted")
+  categorical <- c("Female" = "Female", "Male" = "Male",
+                   "Hispanic/Latino" = "Hispanic.Latino",
+                   "More than one race" = "Multiracial", "Employed" = "Employed")
+  race <- c("White" = "White", "Black/African American" = "Black.African.American",
+            "Asian" = "Asian", "Native American" = "Native.American",
+            "Alaska Native" = "Alaska.Native", "Pacific Islander" = "Pacific.Islander",
+            "Other race" = "Some.other.race")
+
+  tibble(
+    Characteristic = c("N", "Age, years", "Baseline MADRS", "Baseline SHAPS",
+      "Age of MDD onset, years", "Number of lifetime depressive episodes",
+      "Female", "Male", "Hispanic/Latino", names(race),
+      "More than one race", "Employed", "Years of education"),
+    value = c(
+      n_distinct(d$study_id),
+      sapply(d[continuous], mean_sd),
+      n_pct(d$sex, "Female"), n_pct(d$sex, "Male"),
+      n_pct(d$Hispanic.Latino), sapply(race, \(x) race_pct(d, x)),
+      n_pct(d$Multiracial), n_pct(d$Employed),
+      mean_sd(d$demog_edu_yr_latn_adapted)))}
+
+# 4. APA demographic table by response and remission
+apa_demographics <- list(
+  Overall = demog_data,
+  `Non-Responder` = filter(demog_data, responder_status == "Non-Responder"),
+  Responder = filter(demog_data, responder_status == "Responder"),
+  `Non-Remitter` = filter(demog_data, remission_status == "Non-Remitter"),
+  Remitter = filter(demog_data, remission_status == "Remitter")) %>%
+  lapply(summarize_demog) %>%
+  bind_rows(.id = "Group") %>%
+  pivot_wider(names_from = Group, values_from = value)
+
+View(apa_demographics)
+```
+
+#side effect supplement table
+```{r}
+sideeffects_smart <- read.csv("~/SMART/sideeffects_smart.csv")
+
+# Define final analysis sample
+sample_ids <- smart_prepost_trt %>%
+  filter(!is.na(MADRS_w8)) %>%
+  transmute(record_id = as.character(study_id), Medication) %>%
+  distinct()
+
+# TESS symptom labels
+labels <- list(
+  sub_tess_beh_tox = c("Toxic confusional state", "Excitement/agitation", "Depressive affect",
+                       "Increased motor activity", "Decreased motor activity", "Insomnia", "Drowsiness"),
+  sub_tess_abn = c("Abnormal hematologic", "Abnormal liver", "Abnormal urine"),
+  sub_tess_neu = c("Rigidity", "Tremor", "Dystonic symptoms", "Akathisia"),
+  sub_tess_auto = c("Dry mouth", "Nasal congestion", "Blurred vision", "Constipation",
+                    "Increased salivation", "Sweating", "Nausea/vomiting", "Diarrhea"),
+  sub_tess_cardio = c("Hypotension", "Syncope/dizziness", "Tachycardia",
+                      "Hypertension", "EKG abnormalities"),
+  sub_tess_other = c("Dermatologic", "Weight gain", "Weight loss",
+                     "Decreased appetite", "Headache", "Tardive dyskinesia"))
+
+symptom_key <- imap_dfr(labels, ~tibble(
+  variable = paste0(.y, "___", seq_along(.x)), side_effect = .x))
+
+# Count each symptom once per participant across weeks 1–8
+sideeffects_overall <- sideeffects_smart %>%
+  mutate(record_id = as.character(record_id)) %>%
+  filter(str_detect(redcap_event_name, "week_[1-8](?![0-9])")) %>%
+  inner_join(sample_ids, by = "record_id") %>%
+  pivot_longer(all_of(symptom_key$variable),
+               names_to = "variable", values_to = "reported") %>%
+  left_join(symptom_key, by = "variable") %>%
+  group_by(record_id, Medication, side_effect) %>%
+  summarise(reported = any(as.character(reported) == "1", na.rm = TRUE),
+            .groups = "drop")
+
+# Calculate medication-specific incidence
+group_N <- sample_ids %>% count(Medication, name = "N")
+
+sideeffects_summary <- sideeffects_overall %>%
+  group_by(side_effect, Medication) %>%
+  summarise(n = sum(reported), .groups = "drop") %>%
+  left_join(group_N, by = "Medication") %>%
+  group_by(side_effect) %>%
+  filter(sum(n) > 0) %>%
+  mutate(total = sum(n)) %>%
+  ungroup() %>%
+  mutate(result = sprintf("%d (%.1f%%)", n, 100*n/N)) %>%
+  select(side_effect, Medication, result, total) %>%
+  pivot_wider(names_from = Medication, values_from = result) %>%
+  arrange(desc(total), side_effect) %>%
+  select(-total)
+
+View(group_N)
+View(sideeffects_summary)
+
+# Create and export Word table
+tab <- sideeffects_summary %>%
+  rename(`Side Effect` = side_effect) %>%
+  select(`Side Effect`, SERTRALINE, BUPROPION)
+
+ft <- flextable(tab) %>%
+  set_header_labels(SERTRALINE = "Sertraline",
+                    BUPROPION = "Bupropion") %>%
+  add_header_row(values = c("", "Medication Received"),
+                 colwidths = c(1, 2)) %>%
+  theme_booktabs() %>%
+  bold(part = "header") %>%
+  align(j = 2:3, align = "center", part = "all") %>%
+  fontsize(size = 10, part = "all") %>%
+  autofit()
+
+doc <- read_docx() %>%
+  body_add_par("Supplementary Table 1", style = "heading 1") %>%
+  body_add_par("Side effects reported during 8 weeks of antidepressant treatment") %>%
+  body_add_flextable(ft) %>%
+  body_add_par("Note. Values are n (%), calculated using the total number of participants in each medication group. Each participant was counted once per symptom, regardless of the number of visits at which it was reported.")
+
+ft
+```
+
+#1.if people change in rsfc pre and post
+##1.1 25
+```{r}
+roi_vars_all <- names(smart_prepostrsfc_25) %>%
+  purrr::keep(~ grepl("_ROI$", .x)) %>%
+  na.omit() %>%as.character()
+
+length(roi_vars_all)
+head(roi_vars_all)
+tail(roi_vars_all)
+
+roi_vars <- roi_vars_all[
+  map_lgl(roi_vars_all, function(roi) {pre_values <- smart_prepostrsfc_25 %>%
+      filter(timepoint == "pre") %>% pull(all_of(roi))
+    post_values <- smart_prepostrsfc_25 %>%
+      filter(timepoint == "post") %>% pull(all_of(roi))
+    pre_has_data <- any(!is.na(pre_values))
+    post_has_data <- any(!is.na(post_values))
+    pre_has_data & post_has_data})]
+
+roi_vars <- roi_vars[!is.na(roi_vars)]
+
+length(roi_vars_all)
+length(roi_vars)
+
+removed_rois <- setdiff(roi_vars_all, roi_vars)
+
+#linear mixed effect model
+run_prepost_rsfc_lmer <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, value, age_c, sex, mean_fd_c)
+  
+  n_subjects <- dat %>% distinct(study_id) %>% nrow()
+  
+  n_complete <- dat %>% count(study_id) %>% filter(n == 2) %>% nrow()
+  if (n_complete < 5) {
+    return(tibble(
+      region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_timepoint = NA_real_,
+      t_value = NA_real_,
+      df = NA_real_,
+      p_value = NA_real_,
+      singular = NA))}
+  
+  model <- lmerTest::lmer(value ~ timepoint + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  
+  model_out <- broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost")
+  
+  tibble(region = roi,
+    n_subjects = n_subjects,
+    n_complete = n_complete,
+    beta_timepoint = model_out$estimate,
+    t_value = model_out$statistic,
+    df = model_out$df,
+    p_value = model_out$p.value,
+    singular = lme4::isSingular(model))
+}
+
+rsfc_prepost_25_lmer_results <- map_dfr(roi_vars, run_prepost_rsfc_lmer) %>%
+  mutate(pfdr = p.adjust(p_value, method = "BH")) %>% arrange(p_value)
+```
+###1.1.1 plot brain map
+```{r}
+glasser_atlas <- ggsegGlasser::glasser
+
+brain_25_results <- rsfc_prepost_25_lmer_results %>%
+  transmute(original_roi = region, t_value, p_value, pfdr,
+            parcel = region %>% str_remove("^[LR]_") %>% str_remove("_ROI$"),
+            label = case_when(str_detect(region, "^L_") ~ paste0("lh_L_", parcel),
+                              str_detect(region, "^R_") ~ paste0("rh_R_", parcel), TRUE ~ NA_character_),
+            significant = !is.na(pfdr) & pfdr < 0.05)
+
+plot_data <- glasser_atlas$data %>% left_join(brain_25_results, by = "label")
+t_limit <- max(abs(brain_25_results$t_value), na.rm = TRUE)
+
+OverallChange_BA25 <- ggplot() +
+  geom_sf(data = plot_data, aes(fill = t_value), colour = "grey50", linewidth = 0.15) +
+  geom_sf(data = plot_data %>% filter(significant), fill = NA, colour = "black", linewidth = 0.6) +
+  geom_sf(data = plot_data %>% filter(str_detect(label, "25")),
+          fill = "#008080", colour = "#008080", linewidth = 0.8) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       midpoint = 0, limits = c(-t_limit, t_limit),
+                       na.value = "grey92", name = "t statistic") +
+  labs(title = "Pre- to Post-Treatment rsFC Change",
+       subtitle = "Cortical connectivity with sgACC",
+       caption = "Black outline: pFDR < .05\nTeal: sgACC seed (BA25)") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+OverallChange_BA25
+
+ggsave("OverallChange_BA25.png", plot = OverallChange_BA25, width = 10, height = 6, units = "in", dpi = 600)
+```
+###1.2.2 covariate for med and marker
+```{r}
+run_prepost_25_med <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,actual_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost") %>%
+    transmute(region=roi,beta_timepoint=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_prepost_25_med <- map_dfr(roi_vars,run_prepost_25_med) %>%
+  mutate(pfdr=p.adjust(p_value,"BH")) %>% arrange(p_value)
+
+run_prepost_25_marker <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,marker_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint + marker_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost") %>%
+    transmute(region=roi,beta_timepoint=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_prepost_25_marker <- map_dfr(roi_vars,run_prepost_25_marker) %>%
+  mutate(pfdr=p.adjust(p_value,"BH")) %>% arrange(p_value)
+
+rsfc_prepost_25_compare <- rsfc_prepost_25_lmer_results %>%
+  select(region,beta_original=beta_timepoint,p_original=p_value,pfdr_original=pfdr) %>%
+  left_join(rsfc_prepost_25_med %>%
+    select(region,beta_med=beta_timepoint,p_med=p_value,pfdr_med=pfdr),by="region") %>%
+  left_join(rsfc_prepost_25_marker %>%
+    select(region,beta_marker=beta_timepoint,p_marker=p_value,pfdr_marker=pfdr),by="region") %>%
+  arrange(pfdr_original)
+```
+
+##1.2 PeEC, EC, Hipp, Pres
+```{r}
+roi_vars_all <- names(smart_prepostrsfc_PeEC) %>%
+  purrr::keep(~ grepl("_ROI$", .x)) %>%
+  na.omit() %>%as.character()
+
+length(roi_vars_all)
+head(roi_vars_all)
+tail(roi_vars_all)
+
+roi_vars <- roi_vars_all[
+  map_lgl(roi_vars_all, function(roi) {pre_values <- smart_prepostrsfc_PeEC %>%
+      filter(timepoint == "pre") %>% pull(all_of(roi))
+    post_values <- smart_prepostrsfc_PeEC %>%
+      filter(timepoint == "post") %>% pull(all_of(roi))
+    pre_has_data <- any(!is.na(pre_values))
+    post_has_data <- any(!is.na(post_values))
+    pre_has_data & post_has_data})]
+
+roi_vars <- roi_vars[!is.na(roi_vars)]
+
+length(roi_vars_all)
+length(roi_vars)
+
+removed_rois <- setdiff(roi_vars_all, roi_vars)
+
+#linear mixed effect model
+run_prepost_rsfc_lmer <- function(roi) {
+  dat <- smart_prepostrsfc_PeEC %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, value, age_c, sex, mean_fd_c)
+  
+  n_subjects <- dat %>% distinct(study_id) %>% nrow()
+  
+  n_complete <- dat %>% count(study_id) %>% filter(n == 2) %>% nrow()
+  if (n_complete < 5) {
+    return(tibble(
+      region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_timepoint = NA_real_,
+      t_value = NA_real_,
+      df = NA_real_,
+      p_value = NA_real_,
+      singular = NA))}
+  
+  model <- lmerTest::lmer(value ~ timepoint + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  
+  model_out <- broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost")
+  
+  tibble(region = roi,
+    n_subjects = n_subjects,
+    n_complete = n_complete,
+    beta_timepoint = model_out$estimate,
+    t_value = model_out$statistic,
+    df = model_out$df,
+    p_value = model_out$p.value,
+    singular = lme4::isSingular(model))
+}
+
+rsfc_prepost_PeEC_lmer_results <- map_dfr(roi_vars, run_prepost_rsfc_lmer) %>%
+  mutate(pfdr = p.adjust(p_value, method = "BH")) %>% arrange(p_value)
+```
+###1.2.1 plot brain map
+```{r}
+glasser_atlas <- ggsegGlasser::glasser
+
+PeEC_brain_results <- rsfc_prepost_PeEC_lmer_results %>%
+  transmute(original_roi = region, t_value, p_value, pfdr,
+            parcel = region %>%
+              str_remove("^[LR]_") %>% str_remove("_ROI$"),
+            label = case_when(str_detect(region, "^L_") ~ paste0("lh_L_", parcel),
+                              str_detect(region, "^R_") ~ paste0("rh_R_", parcel), TRUE ~ NA_character_),
+            significant = !is.na(pfdr) & pfdr < 0.05)
+
+matching_check <- PeEC_brain_results %>%
+  mutate(matched = label %in% glasser_atlas$data$label)
+
+matching_check %>% count(matched)
+
+plot_data <- glasser_atlas$data %>%
+  left_join(PeEC_brain_results, by = "label")
+
+sig_labels <- plot_data %>% 
+  filter(significant) %>%
+  st_point_on_surface() %>%
+  mutate(x = st_coordinates(geometry)[, 1],
+         y = st_coordinates(geometry)[, 2])
+
+t_limit <- max(abs(PeEC_brain_results$t_value), na.rm = TRUE)
+
+OverallChange_HippocampalFormation <- ggplot() +
+  geom_sf(data = plot_data, aes(fill = t_value), colour = "grey50", linewidth = 0.15) +
+  geom_sf(data = plot_data %>% filter(significant), fill = NA, colour = "black", linewidth = 0.6) +
+  geom_sf(data = plot_data %>%
+            filter(label %in% c("lh_L_EC", "rh_R_EC",
+                                "lh_L_PreS", "rh_R_PreS",
+                                "lh_L_PeEc", "rh_R_PeEc",
+                                "lh_L_H", "rh_R_H")),
+          fill = "#008080", colour = "#008080", linewidth = 0.8) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       midpoint = 0, limits = c(-t_limit, t_limit),
+                       na.value = "grey92", name = "t statistic") +
+  labs(title = "Pre- to Post-Treatment rsFC Change",
+       subtitle = "Cortical connectivity with Hippocampal Formation",
+       caption = "Black outline: pFDR < .05\nTeal: Hippocampal formation seed (EC, PreS, PeEc, H)") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+OverallChange_HippocampalFormation
+
+ggsave("OverallChange_HippocampalFormation.png",
+       plot = OverallChange_HippocampalFormation,
+       width = 10, height = 6, units = "in", dpi = 600)
+```
+###1.4.2 covariate for med and marker
+```{r}
+run_prepost_PeEC_med <- function(roi) {
+  dat <- smart_prepostrsfc_PeEC %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),actual_treatment=factor(actual_treatment),
+           sex=factor(sex),age_c=age-mean(age,na.rm=T),mean_fd_c=mean_fd-mean(mean_fd,na.rm=T)) %>%
+    drop_na(study_id,timepoint,actual_treatment,value,age_c,sex,mean_fd_c)
+  model <- lmerTest::lmer(value ~ timepoint + actual_treatment + age_c + sex + mean_fd_c + (1|study_id),data=dat)
+  broom.mixed::tidy(model,effects="fixed") %>% filter(term=="timepointpost") %>%
+    transmute(region=roi,beta_timepoint=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+run_prepost_PeEC_marker <- function(roi) {
+  dat <- smart_prepostrsfc_PeEC %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),marker_treatment=factor(marker_treatment),
+           sex=factor(sex),age_c=age-mean(age,na.rm=T),mean_fd_c=mean_fd-mean(mean_fd,na.rm=T)) %>%
+    drop_na(study_id,timepoint,marker_treatment,value,age_c,sex,mean_fd_c)
+  model <- lmerTest::lmer(value ~ timepoint + marker_treatment + age_c + sex + mean_fd_c + (1|study_id),data=dat)
+  broom.mixed::tidy(model,effects="fixed") %>% filter(term=="timepointpost") %>%
+    transmute(region=roi,beta_timepoint=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_prepost_PeEC_med <- map_dfr(roi_vars,run_prepost_PeEC_med) %>%
+  mutate(pfdr=p.adjust(p_value,"BH")) %>% arrange(p_value)
+
+rsfc_prepost_PeEC_marker <- map_dfr(roi_vars,run_prepost_PeEC_marker) %>%
+  mutate(pfdr=p.adjust(p_value,"BH")) %>% arrange(p_value)
+
+rsfc_prepost_PeEC_compare <- rsfc_prepost_PeEC_lmer_results %>%
+  select(region,beta_original=beta_timepoint,p_original=p_value,pfdr_original=pfdr) %>%
+  left_join(rsfc_prepost_PeEC_med %>% select(region,beta_med=beta_timepoint,p_med=p_value,pfdr_med=pfdr),by="region") %>%
+  left_join(rsfc_prepost_PeEC_marker %>% select(region,beta_marker=beta_timepoint,p_marker=p_value,pfdr_marker=pfdr),by="region") %>%
+  arrange(pfdr_original)
+```
+
+##1.3 a24p32
+```{r}
+roi_vars_all <- names(smart_prepostrsfc_a24p32) %>%
+  purrr::keep(~ grepl("_ROI$", .x)) %>%
+  na.omit() %>%as.character()
+
+length(roi_vars_all)
+head(roi_vars_all)
+tail(roi_vars_all)
+
+roi_vars <- roi_vars_all[
+  map_lgl(roi_vars_all, function(roi) {pre_values <- smart_prepostrsfc_a24p32 %>%
+      filter(timepoint == "pre") %>% pull(all_of(roi))
+    post_values <- smart_prepostrsfc_a24p32 %>%
+      filter(timepoint == "post") %>% pull(all_of(roi))
+    pre_has_data <- any(!is.na(pre_values))
+    post_has_data <- any(!is.na(post_values))
+    pre_has_data & post_has_data})]
+
+roi_vars <- roi_vars[!is.na(roi_vars)]
+
+length(roi_vars_all)
+length(roi_vars)
+
+removed_rois <- setdiff(roi_vars_all, roi_vars)
+
+#linear mixed effect model
+run_prepost_rsfc_lmer <- function(roi) {
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, value, age_c, sex, mean_fd_c)
+  
+  n_subjects <- dat %>% distinct(study_id) %>% nrow()
+  
+  n_complete <- dat %>% count(study_id) %>% filter(n == 2) %>% nrow()
+  if (n_complete < 5) {
+    return(tibble(
+      region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_timepoint = NA_real_,
+      t_value = NA_real_,
+      df = NA_real_,
+      p_value = NA_real_,
+      singular = NA))}
+  
+  model <- lmerTest::lmer(value ~ timepoint + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  
+  model_out <- broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost")
+  
+  tibble(region = roi,
+    n_subjects = n_subjects,
+    n_complete = n_complete,
+    beta_timepoint = model_out$estimate,
+    t_value = model_out$statistic,
+    df = model_out$df,
+    p_value = model_out$p.value,
+    singular = lme4::isSingular(model))
+}
+
+rsfc_prepost_a24p32_lmer_results <- map_dfr(roi_vars, run_prepost_rsfc_lmer) %>%
+  mutate(pfdr = p.adjust(p_value, method = "BH")) %>% arrange(p_value)
+
+```
+###1.3.1 plot brain maps, a24p32
+```{r}
+glasser_atlas <- ggsegGlasser::glasser
+
+a24p32_brain_results <- rsfc_prepost_a24p32_lmer_results %>%
+  transmute(original_roi = region, t_value, p_value, pfdr,
+            parcel = region %>% str_remove("^[LR]_") %>% str_remove("_ROI$"),
+            label = case_when(str_detect(region, "^L_") ~ paste0("lh_L_", parcel),
+                              str_detect(region, "^R_") ~ paste0("rh_R_", parcel), TRUE ~ NA_character_),
+            significant = !is.na(pfdr) & pfdr < 0.05)
+
+plot_data <- glasser_atlas$data %>% left_join(a24p32_brain_results, by = "label")
+t_limit <- max(abs(a24p32_brain_results$t_value), na.rm = TRUE)
+
+OverallChange_pgACC <- ggplot() +
+  geom_sf(data = plot_data, aes(fill = t_value), colour = "grey50", linewidth = 0.15) +
+  geom_sf(data = plot_data %>% filter(significant), fill = NA, colour = "black", linewidth = 0.6) +
+  geom_sf(data = plot_data %>%
+            filter(label %in% c("lh_L_a24", "rh_R_a24",
+                                "lh_L_p32", "rh_R_p32")),
+          fill = "#008080", colour = "#008080", linewidth = 0.8) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       midpoint = 0, limits = c(-t_limit, t_limit),
+                       na.value = "grey92", name = "t statistic") +
+  labs(title = "Pre- to Post-Treatment rsFC Change",
+       subtitle = "Cortical connectivity with pgACC",
+       caption = "Black outline: pFDR < .05\nTeal: pgACC seed (a24 and p32)") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+OverallChange_pgACC
+
+ggsave("OverallChange_pgACC.png", plot = OverallChange_pgACC,
+       width = 10, height = 6, units = "in", dpi = 600)
+```
+###1.3.2 covariate for med and marker
+```{r}
+run_prepost_a24p32_med <- function(roi) {
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,actual_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint + actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost") %>%
+    transmute(region=roi,beta_timepoint=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_prepost_a24p32_med <- map_dfr(roi_vars,run_prepost_a24p32_med) %>%
+  mutate(pfdr=p.adjust(p_value,"BH")) %>% arrange(p_value)
+
+run_prepost_a24p32_marker <- function(roi) {
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,marker_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint + marker_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost") %>%
+    transmute(region=roi,beta_timepoint=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_prepost_a24p32_marker <- map_dfr(roi_vars,run_prepost_a24p32_marker) %>%
+  mutate(pfdr=p.adjust(p_value,"BH")) %>% arrange(p_value)
+
+rsfc_prepost_a24p32_compare <- rsfc_prepost_a24p32_lmer_results %>%
+  select(region,beta_original=beta_timepoint,p_original=p_value,pfdr_original=pfdr) %>%
+  left_join(rsfc_prepost_a24p32_med %>%
+    select(region,beta_med=beta_timepoint,p_med=p_value,pfdr_med=pfdr),by="region") %>%
+  left_join(rsfc_prepost_a24p32_marker %>%
+    select(region,beta_marker=beta_timepoint,p_marker=p_value,pfdr_marker=pfdr),by="region") %>%
+  arrange(pfdr_original)
+```
+
+##1.4 p24a32pr
+```{r}
+roi_vars_all <- names(smart_prepostrsfc_p24a32pr) %>%
+  purrr::keep(~ grepl("_ROI$", .x)) %>%
+  na.omit() %>%as.character()
+
+length(roi_vars_all)
+head(roi_vars_all)
+tail(roi_vars_all)
+
+roi_vars <- roi_vars_all[
+  map_lgl(roi_vars_all, function(roi) {pre_values <- smart_prepostrsfc_p24a32pr %>%
+      filter(timepoint == "pre") %>% pull(all_of(roi))
+    post_values <- smart_prepostrsfc_p24a32pr %>%
+      filter(timepoint == "post") %>% pull(all_of(roi))
+    pre_has_data <- any(!is.na(pre_values))
+    post_has_data <- any(!is.na(post_values))
+    pre_has_data & post_has_data})]
+
+roi_vars <- roi_vars[!is.na(roi_vars)]
+
+length(roi_vars_all)
+length(roi_vars)
+
+removed_rois <- setdiff(roi_vars_all, roi_vars)
+
+#linear mixed effect model
+run_prepost_rsfc_lmer <- function(roi) {
+  dat <- smart_prepostrsfc_p24a32pr %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, value, age_c, sex, mean_fd_c)
+  
+  n_subjects <- dat %>% distinct(study_id) %>% nrow()
+  
+  n_complete <- dat %>% count(study_id) %>% filter(n == 2) %>% nrow()
+  if (n_complete < 5) {
+    return(tibble(
+      region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_timepoint = NA_real_,
+      t_value = NA_real_,
+      df = NA_real_,
+      p_value = NA_real_,
+      singular = NA))}
+  
+  model <- lmerTest::lmer(value ~ timepoint + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  
+  model_out <- broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost")
+  
+  tibble(region = roi,
+    n_subjects = n_subjects,
+    n_complete = n_complete,
+    beta_timepoint = model_out$estimate,
+    t_value = model_out$statistic,
+    df = model_out$df,
+    p_value = model_out$p.value,
+    singular = lme4::isSingular(model))
+}
+
+
+rsfc_prepost_p24a32pr_lmer_results <- map_dfr(roi_vars, run_prepost_rsfc_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right",TRUE ~ "Other" ) ) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr = p.adjust(p_value, method = "BH") )
+```
+###1.4.1 plot brain map
+```{r}
+glasser_atlas <- ggsegGlasser::glasser
+
+p24a32pr_brain_results <- rsfc_prepost_p24a32pr_lmer_results %>%
+  transmute(original_roi = region, t_value, p_value, pfdr,
+            parcel = region %>% str_remove("^[LR]_") %>% str_remove("_ROI$"),
+            label = case_when(str_detect(region, "^L_") ~ paste0("lh_L_", parcel),
+                              str_detect(region, "^R_") ~ paste0("rh_R_", parcel), TRUE ~ NA_character_),
+            significant = !is.na(pfdr) & pfdr < 0.05)
+
+plot_data <- glasser_atlas$data %>% left_join(p24a32pr_brain_results, by = "label")
+t_limit <- max(abs(p24a32pr_brain_results$t_value), na.rm = TRUE)
+
+OverallChange_dACC <- ggplot() +
+  geom_sf(data = plot_data, aes(fill = t_value), colour = "grey50", linewidth = 0.15) +
+  geom_sf(data = plot_data %>% filter(significant), fill = NA, colour = "black", linewidth = 0.6) +
+  geom_sf(data = plot_data %>%
+            filter(label %in% c("lh_L_p24", "rh_R_p24",
+                                "lh_L_a32pr", "rh_R_a32pr")),
+          fill = "#008080", colour = "#008080", linewidth = 0.8) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       midpoint = 0, limits = c(-t_limit, t_limit),
+                       na.value = "grey92", name = "t statistic") +
+  labs(title = "Pre- to Post-Treatment rsFC Change",
+       subtitle = "Cortical connectivity with dACC",
+       caption = "Black outline: pFDR < .05\nTeal: dACC seed (p24 and a32pr)") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+ggsave("OverallChange_dACC.png", plot = OverallChange_dACC,
+       width = 10, height = 6, units = "in", dpi = 600)
+```
+###1.4.2 covariate for med and marker
+```{r}
+run_prepost_p24a32pr_med <- function(roi) {
+  dat <- smart_prepostrsfc_p24a32pr %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,actual_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint + actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost") %>%
+    transmute(region=roi,beta_timepoint=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_prepost_p24a32pr_med <- map_dfr(roi_vars,run_prepost_p24a32pr_med) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+run_prepost_p24a32pr_marker <- function(roi) {
+  dat <- smart_prepostrsfc_p24a32pr %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,marker_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint + marker_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost") %>%
+    transmute(region=roi,beta_timepoint=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_prepost_p24a32pr_marker <- map_dfr(roi_vars,run_prepost_p24a32pr_marker) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+rsfc_prepost_p24a32pr_compare <- rsfc_prepost_p24a32pr_lmer_results %>%
+  ungroup() %>%
+  select(region,beta_original=beta_timepoint,p_original=p_value,pfdr_original=pfdr) %>%
+  left_join(rsfc_prepost_p24a32pr_med %>%
+    select(region,beta_med=beta_timepoint,p_med=p_value,pfdr_med=pfdr),by="region") %>%
+  left_join(rsfc_prepost_p24a32pr_marker %>%
+    select(region,beta_marker=beta_timepoint,p_marker=p_value,pfdr_marker=pfdr),by="region") %>%
+  arrange(pfdr_original)
+```
+
+#2.if responder non responder differ in rsfc
+##2.1 25
+```{r}
+roi_vars_25 <- names(smart_prepostrsfc_25) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_25 %>% select(timepoint, value = all_of(.x))
+    any(!is.na(dat$value[dat$timepoint == "pre"])) &&
+      any(!is.na(dat$value[dat$timepoint == "post"]))})
+
+run_25_responder_lmer <- function(roi) {
+  
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(responder_info, by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, responder_status, value, age_c, sex, mean_fd_c)
+  
+  n_subjects <- n_distinct(dat$study_id)
+  n_complete <- dat %>% count(study_id) %>% filter(n == 2) %>% nrow()
+  
+  if (n_complete < 8 || n_distinct(dat$responder_status) < 2) {
+    return(tibble(region = roi, n_subjects, n_complete,
+                  beta_interaction = NA_real_, t_value = NA_real_,
+                  df = NA_real_, p_value = NA_real_, singular = NA))}
+  
+  model <- lmerTest::lmer(value ~ timepoint * responder_status + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  
+  broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:responder_statusResponder") %>%
+    transmute(
+      region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_interaction = estimate,
+      t_value = statistic,
+      df = df,
+      p_value = p.value,
+      singular = lme4::isSingular(model))}
+
+rsfc_25_responder_change_results <- map_dfr(roi_vars_25, run_25_responder_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(hemisphere, p_value)
+```
+### 2.1.1 25, covariate for meds&marker
+```{r}
+#meds
+roi_vars_25 <- names(smart_prepostrsfc_25) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_25 %>% select(timepoint, value = all_of(.x))
+    any(!is.na(dat$value[dat$timepoint == "pre"])) &&
+      any(!is.na(dat$value[dat$timepoint == "post"]))})
+
+run_25_responder_lmer <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(responder_info, by = "study_id") %>%
+    left_join(treatment_info, by = "study_id") %>%
+    mutate(timepoint = factor(timepoint,levels = c("pre", "post")),
+           responder_status = factor(responder_status,levels = c("Non-Responder", "Responder")),
+           actual_treatment = factor(actual_treatment, levels = c("SER", "BUP")),
+           sex = factor(sex),
+           age_c = age - mean(age, na.rm = TRUE),
+           mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id,timepoint,responder_status,actual_treatment,value,age_c,sex,mean_fd_c)
+  n_subjects <- n_distinct(dat$study_id)
+   n_complete <- dat %>%
+    distinct(study_id, timepoint) %>%
+    count(study_id) %>%
+    filter(n == 2) %>%
+    nrow()
+     if (n_complete < 8 ||
+         n_distinct(dat$responder_status) < 2 ||
+         n_distinct(dat$actual_treatment) < 2) {
+    return(tibble(region = roi,
+                  n_subjects = n_subjects,
+                  n_complete = n_complete,
+                  beta_interaction = NA_real_,
+                  t_value = NA_real_,
+                  df = NA_real_,
+                  p_value = NA_real_,
+                  singular = NA))}
+
+  model <- lmerTest::lmer(value ~ timepoint * responder_status + timepoint * actual_treatment + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+
+  model_out <- broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:responder_statusResponder" )
+
+  if (nrow(model_out) == 0) {
+    return(tibble(
+        region = roi,
+        n_subjects = n_subjects,
+        n_complete = n_complete,
+        beta_interaction = NA_real_,
+        t_value = NA_real_,
+        df = NA_real_,
+        p_value = NA_real_,
+        singular = lme4::isSingular(model)))}
+
+  model_out %>%
+    transmute(region = roi,
+              n_subjects = n_subjects,
+              n_complete = n_complete,
+              beta_interaction = estimate,
+              t_value = statistic,
+              df = df,
+              p_value = p.value,
+              singular = lme4::isSingular(model))}
+
+rsfc_25_responder_change_results_med <- map_dfr(roi_vars_25, run_25_responder_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(hemisphere, p_value)
+
+##covartiate for marker
+run_25_responder_lmer <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(responder_info, by = "study_id") %>% left_join(treatment_info, by = "study_id") %>%
+    left_join(marker_info, by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre","post")),
+           responder_status = factor(responder_status, levels = c("Non-Responder","Responder")),
+           actual_treatment = factor(actual_treatment, levels = c("SER","BUP")),
+           marker_treatment = factor(marker_treatment), sex = factor(sex),
+           age_c = age - mean(age, na.rm=TRUE), mean_fd_c = mean_fd - mean(mean_fd, na.rm=TRUE)) %>%
+    drop_na(study_id, timepoint, responder_status, actual_treatment, marker_treatment, value, age_c, sex, mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*responder_status + timepoint* marker_treatment 
+                          + age_c + sex + mean_fd_c + (1|study_id), data=dat)
+
+  broom.mixed::tidy(model, effects="fixed") %>%
+    filter(term=="timepointpost:responder_statusResponder") %>%
+    transmute(region=roi, beta_interaction=estimate, t_value=statistic, df=df, p_value=p.value)
+}
+
+rsfc_25_responder_marker <- map_dfr(roi_vars_25, run_25_responder_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region,"^L_")~"Left",
+                                str_detect(region,"^R_")~"Right", TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+rsfc_25_responder_change_withmarker_compare <- rsfc_25_responder_change_results %>%
+  select(region, beta_original=beta_interaction, p_original=p_value, pfdr_original=pfdr_hemi) %>%
+  left_join(rsfc_25_responder_change_results_med %>%
+    select(region, beta_med=beta_interaction, p_med=p_value, pfdr_med=pfdr_hemi), by="region") %>%
+  left_join(rsfc_25_responder_marker %>%
+              select(region, beta_marker=beta_interaction, p_marker=p_value, pfdr_marker=pfdr_hemi),
+            by="region") %>%
+  arrange(pfdr_marker)
+```
+### 2.1.2 plot brain maps, 25,response
+```{r}
+glasser_atlas <- ggsegGlasser::glasser
+
+responder_25_brain_results <- rsfc_25_responder_change_results %>%
+  transmute(original_roi = region, t_value, p_value, pfdr_hemi,
+            parcel = region %>% str_remove("^[LR]_") %>% str_remove("_ROI$"),
+            label = case_when(str_detect(region, "^L_") ~ paste0("lh_L_", parcel),
+                              str_detect(region, "^R_") ~ paste0("rh_R_", parcel), TRUE ~ NA_character_),
+            significant = !is.na(pfdr_hemi) & pfdr_hemi < 0.05)
+
+plot_data <- glasser_atlas$data %>%
+  left_join(responder_25_brain_results, by = "label")
+
+t_limit <- max(abs(responder_25_brain_results$t_value), na.rm = TRUE)
+
+ResponderChange_sgACC <- ggplot() +
+  geom_sf(data = plot_data, aes(fill = t_value), colour = "grey50", linewidth = 0.15) +
+  geom_sf(data = plot_data %>% filter(significant),
+          fill = NA, colour = "black", linewidth = 0.6) +
+  geom_sf(data = plot_data %>%
+            filter(label %in% c("lh_L_25", "rh_R_25")),
+          fill = "#008080", colour = "#008080", linewidth = 0.8) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       midpoint = 0, limits = c(-t_limit, t_limit),
+                       na.value = "grey92", name = "t statistic") +
+  labs(title = "Pre-to-Post rsFC Change Differs by Responder Status",
+       subtitle = "Cortical connectivity with sgACC",
+       caption = "Black outline: pFDR < .05\nTeal: sgACC seed (BA25)") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+ResponderChange_sgACC
+
+ggsave("ResponderChange_sgACC.png", plot = ResponderChange_sgACC,
+       width = 10, height = 6, units = "in", dpi = 600)
+```
+###2.1.3 plot significant roi for responder
+```{r}
+make_spaghetti <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id, timepoint, value = all_of(roi)) %>%
+    left_join(smart_prepost_trt %>% select(study_id, responder_status) %>% distinct(), by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, c("pre", "post")),
+           responder_status = factor(responder_status,
+                                     levels = c("Non-Responder", "Responder"),
+                                     labels = c("Non-Responders", "Responders"))) %>%
+    drop_na(study_id, timepoint, responder_status, value)
+
+  ggplot(dat, aes(timepoint, value, group = study_id)) +
+    geom_line(alpha = .2, linewidth = .35) + geom_point(size = 1.5, alpha = .55) +
+    stat_summary(aes(group = responder_status), fun = mean, geom = "line", linewidth = 1.2) +
+    stat_summary(fun = mean, geom = "point", size = 3) +
+    stat_summary(fun.data = mean_se, geom = "errorbar", width = .08) +
+    facet_wrap(
+  ~responder_status,
+  labeller = labeller(
+    responder_status = c(
+      "Non-Responders" = "Non-Responders",
+      "Responders" = "Responders"))) + theme_classic() +
+    theme(axis.text = element_text(size = 16), axis.title = element_text(size = 14),
+          strip.text = element_text(size = 16, face = "bold"),
+          plot.title = element_text(size = 16, face = "bold", hjust = .5)) +
+    labs(title = roi
+         %>% str_remove("_ROI$") %>% str_replace("^R_", "Right ") %>% str_replace("^L_", "Left "),
+         x = "Timepoint", y = "sgACC-seeded rsFC")}
+
+
+p_PHA2 <- make_spaghetti("R_PHA2_ROI")
+p_47m  <- make_spaghetti("R_47m_ROI")
+p_p47r <- make_spaghetti("R_p47r_ROI")
+p_te1p <- make_spaghetti("R_TE1p_ROI")
+
+ggsave("Response_sgACC_R_PHA2.png", p_PHA2, width = 5, height = 5, dpi = 600)
+ggsave("Response_sgACC_R_47m.png", p_47m, width = 5, height = 5, dpi = 600)
+ggsave("Response_sgACC_R_p47r.png", p_p47r, width = 5, height = 5, dpi = 600)
+ggsave("Response_sgACC_R_TE1p.png", p_te1p, width = 5, height = 5, dpi = 600)
+```
+###2.1.4 post hoc
+```{r}
+roi_vars_25 <- names(smart_prepostrsfc_25) %>% str_subset("_ROI$")
+
+responder_lookup <- responder_info %>%
+  select(study_id, responder_status) %>%
+  distinct(study_id, .keep_all = TRUE)
+
+run_25_responder_posthoc <- function(roi) {
+
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(responder_lookup, by = "study_id") %>%
+    mutate(
+      timepoint = factor(timepoint, levels = c("pre", "post")),
+      responder_status = factor(responder_status,
+        levels = c("Non-Responder", "Responder"),
+        labels = c("Non-Responders", "Responders")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, responder_status, value, age_c, sex, mean_fd_c)
+
+  if (n_distinct(interaction(dat$responder_status, dat$timepoint, drop = TRUE)) < 4)
+    return(NULL)
+
+  model <- lmer(value ~ timepoint * responder_status + age_c +
+                  sex + mean_fd_c + (1 | study_id), data = dat)
+
+  emm <- emmeans(model, ~ timepoint | responder_status)
+  changes <- contrast(emm, "revpairwise") %>% summary() %>% as_tibble()
+  interaction_test <- contrast(
+    contrast(emm, "revpairwise"), "revpairwise", by = NULL) %>% summary() %>% as_tibble()
+
+  changes %>%
+    transmute(
+      region = roi, responder_status,
+      change = estimate, SE, df,
+      t_within = t.ratio, p_within = p.value,
+      interaction_estimate = interaction_test$estimate[1],
+      t_interaction = interaction_test$t.ratio[1],
+      p_interaction = interaction_test$p.value[1],
+      n_subjects = n_distinct(dat$study_id)) %>%
+    left_join(
+      dat %>% distinct(study_id, responder_status) %>%
+        count(responder_status, name = "n_group"),
+      by = "responder_status")}
+
+responder_25_posthoc_results <- map_dfr(roi_vars_25, run_25_responder_posthoc)
+
+# Hemisphere-wise FDR: one interaction p-value per ROI
+fdr_25 <- responder_25_posthoc_results %>%
+  distinct(region, p_interaction) %>%
+  mutate(hemisphere = str_extract(region, "^[LR]")) %>%
+  group_by(hemisphere) %>%
+  mutate(p_interaction_FDR = p.adjust(p_interaction, method = "BH")) %>%
+  ungroup() %>%
+  select(region, p_interaction_FDR)
+
+responder_25_posthoc_results <- responder_25_posthoc_results %>%
+  left_join(fdr_25, by = "region")
+
+View(responder_25_posthoc_results)
+
+rsfc_change_25 <- smart_prepostrsfc_25 %>%
+  select(study_id, timepoint, all_of(roi_vars_25)) %>%
+  pivot_longer(all_of(roi_vars_25),
+               names_to = "region", values_to = "rsfc") %>%
+  pivot_wider(names_from = timepoint, values_from = rsfc) %>%
+  left_join(responder_lookup, by = "study_id") %>%
+  mutate(
+    change = post - pre,
+    hemisphere = case_when(
+      str_detect(region, "^R_") ~ "Right",
+      str_detect(region, "^L_") ~ "Left"),
+    reason = case_when(
+      is.na(responder_status) ~ "Missing response status",
+      is.na(pre) ~ "Missing pre rsFC",
+      is.na(post) ~ "Missing post rsFC",
+      change == 0 ~ "Zero change",
+      TRUE ~ "Included"))
+
+rsfc_complete_25 <- rsfc_change_25 %>%
+  filter(reason == "Included") %>%
+  mutate(direction = if_else(change > 0, "Increase", "Decrease"))
+
+run_25_responder_fisher <- function(d) {
+
+  tab <- table(
+    factor(d$responder_status, levels = c("Responder", "Non-Responder")),
+    factor(d$direction, levels = c("Increase", "Decrease")))
+
+  if (any(rowSums(tab) == 0)) return(tibble())
+
+  test <- fisher.test(tab)
+
+  tibble(
+    nonresponder_increase = unname(tab[2, 1]),
+    nonresponder_decrease = unname(tab[2, 2]),
+    responder_increase = unname(tab[1, 1]),
+    responder_decrease = unname(tab[1, 2]),
+    odds_ratio = unname(test$estimate),
+    p_value = test$p.value)}
+
+responder_25_fisher <- rsfc_complete_25 %>%
+  group_by(region, hemisphere) %>%
+  group_modify(~ run_25_responder_fisher(.x)) %>%
+  ungroup() %>%
+  group_by(hemisphere) %>%
+  mutate(p_FDR = p.adjust(p_value, method = "BH")) %>%
+  ungroup()
+
+View(responder_25_fisher)
+
+format_n_pct <- function(n, total)
+  sprintf("%d (%.1f%%)", n, 100 * n / total)
+
+format_p <- function(p)
+  ifelse(is.na(p), NA_character_,
+         ifelse(p < .001, "< .001", sprintf("%.3f", p)))
+
+responder_25_fisher_table <- responder_25_fisher %>%
+  mutate(
+    nonresponder_n = nonresponder_increase + nonresponder_decrease,
+    responder_n = responder_increase + responder_decrease,
+    `Non-Responder Increase` = format_n_pct(nonresponder_increase, nonresponder_n),
+    `Non-Responder Decrease` = format_n_pct(nonresponder_decrease, nonresponder_n),
+    `Responder Increase` = format_n_pct(responder_increase, responder_n),
+    `Responder Decrease` = format_n_pct(responder_decrease, responder_n),
+    `Odds Ratio` = round(odds_ratio, 2),
+    p = format_p(p_value),
+    `FDR-adjusted p` = format_p(p_FDR)) %>%
+  select(
+    region, hemisphere,
+    `Non-Responder Increase`, `Non-Responder Decrease`,
+    `Responder Increase`, `Responder Decrease`,
+    `Odds Ratio`, p, `FDR-adjusted p`)
+
+responder_25_fisher_table
+
+responder_25_posthoc <- responder_25_fisher_table %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table X**"),
+    subtitle = md("*Direction of Resting-State Functional Connectivity Change by Treatment Response Status*")
+  ) %>%
+  tab_spanner(
+    label = "Non-Responders",
+    columns = c(`Non-Responder Increase`, `Non-Responder Decrease`)
+  ) %>%
+  tab_spanner(
+    label = "Responders",
+    columns = c(`Responder Increase`, `Responder Decrease`)
+  ) %>%
+  cols_label(
+    region = "Region",
+    hemisphere = "Hemisphere",
+    `Non-Responder Increase` = "Increase, n (%)",
+    `Non-Responder Decrease` = "Decrease, n (%)",
+    `Responder Increase` = "Increase, n (%)",
+    `Responder Decrease` = "Decrease, n (%)",
+    `Odds Ratio` = "OR",
+    p = md("*p*"),
+    `FDR-adjusted p` = md("*p* (FDR)")
+  ) %>%
+  cols_align("left", columns = c(region, hemisphere)) %>%
+  cols_align("center", columns = -c(region, hemisphere)) %>%
+  tab_source_note(md(
+    "*Note.* Values represent the number and percentage of participants showing an increase or decrease in resting-state functional connectivity (rsFC) from pre- to post-treatment. Change was calculated as post-treatment minus pre-treatment rsFC. Participants with zero change or missing measurements were excluded. Fisher's exact tests compared the distribution of increases versus decreases between responders and non-responders. OR = odds ratio for increased versus decreased rsFC in responders relative to non-responders. FDR correction was performed separately by hemisphere using the Benjamini-Hochberg procedure."))
+
+responder_25_posthoc
+gtsave(responder_25_posthoc, "responder_25_posthoc.rtf")
+
+target_rois <- c("R_TE1p_ROI", "R_p47r_ROI")
+
+binomial_results <- rsfc_complete_25 %>%
+  filter(region %in% target_rois) %>%
+  group_by(region, responder_status) %>%
+  summarise(
+    n = n(),
+    n_increase = sum(change > 0),
+    pct_increase = round(100 * n_increase / n, 1),
+    p_binomial = binom.test(n_increase, n, p = 0.5)$p.value,
+    .groups = "drop")
+
+binomial_results
+
+exclusion_summary <- rsfc_change_25 %>%
+  filter(region %in% target_rois) %>%
+  count(region, responder_status, reason)
+
+excluded_participants <- rsfc_change_25 %>%
+  filter(region %in% target_rois, reason != "Included") %>%
+  select(study_id, region, responder_status, pre, post, change, reason)
+
+View(exclusion_summary)
+View(excluded_participants)
+```
+####2.1.4.1 plot post hoc
+```{r}
+responder_plot_dat <- responder_25_posthoc_results %>%
+  filter(region %in% (rsfc_25_responder_change_results %>%
+                        filter(pfdr_hemi < .05) %>% pull(region))) %>%
+  mutate(
+    region_label = str_replace_all(str_remove(region, "_ROI$"), "_", " "),
+    region_label = fct_reorder(region_label, change),
+    y_pos = as.numeric(region_label) + ifelse(responder_status == "Responder", .2, -.2),
+    ci_low = change - qt(.975, df) * SE,
+    ci_high = change + qt(.975, df) * SE,
+    p_label = ifelse(p_within < .001, "p < .001", sprintf("p = %.3f", p_within))
+  )
+
+p_x <- max(responder_plot_dat$ci_high, na.rm = TRUE) + .3
+
+ggplot(responder_plot_dat, aes(x = change, y = y_pos, color = responder_status)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_errorbarh(aes(xmin = ci_low, xmax = ci_high), height = .12) +
+  geom_point(aes(shape = p_within < .05), size = 3.5, stroke = 1.2) +
+  scale_shape_manual(values = c("TRUE" = 16, "FALSE" = 1), guide = "none") +
+  geom_text(aes(x = p_x, label = p_label), hjust = 0, size = 4, show.legend = FALSE) +
+  scale_y_continuous(
+    breaks = seq_along(levels(responder_plot_dat$region_label)),
+    labels = levels(responder_plot_dat$region_label)
+  ) +
+  coord_cartesian(xlim = c(min(responder_plot_dat$ci_low) - .4, p_x + 1.2)) +
+  labs(title = "Pre-to-Post Change in sgACC Connectivity",
+       x = "Estimated mean change (Post - Pre)",
+       y = NULL, color = "Response status") +
+  theme_classic(base_size = 15) +
+  theme(
+    plot.title = element_text(size = 16),
+    axis.title.x = element_text(size = 16),
+    axis.text = element_text(size = 16),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    legend.position = "bottom",
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA))
+
+ggsave("sgACC_responder_change.png", width=9, height=5, dpi=300, bg="transparent")
+```
+
+##2.2 PeEC, EC, Hipp, Pres
+```{r}
+roi_vars_PeEC <- names(smart_prepostrsfc_PeEC) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_PeEC %>% select(timepoint, value = all_of(.x))
+    any(!is.na(dat$value[dat$timepoint == "pre"])) &&
+      any(!is.na(dat$value[dat$timepoint == "post"]))})
+
+run_PeEC_responder_lmer <- function(roi) {
+  
+  dat <- smart_prepostrsfc_PeEC %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(responder_info, by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, responder_status, value, age_c, sex, mean_fd_c)
+  
+  n_subjects <- n_distinct(dat$study_id)
+  n_complete <- dat %>% count(study_id) %>% filter(n == 2) %>% nrow()
+  
+  if (n_complete < 8 || n_distinct(dat$responder_status) < 2) {
+    return(tibble(region = roi, n_subjects, n_complete,
+                  beta_interaction = NA_real_, t_value = NA_real_,
+                  df = NA_real_, p_value = NA_real_, singular = NA))}
+  
+  model <- lmerTest::lmer(value ~ timepoint * responder_status + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  
+  broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:responder_statusResponder") %>%
+    transmute(
+      region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_interaction = estimate,
+      t_value = statistic,
+      p_value = p.value,
+      singular = lme4::isSingular(model))}
+
+PeEC_rsfc_responder_change_results <- map_dfr(roi_vars_PeEC, run_PeEC_responder_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() 
+```
+###2.2.1 PeEC, EC, Hipp, Pres, covariate for meds
+```{r}
+run_PeEC_responder_med <- function(roi) {
+  dat <- smart_prepostrsfc_PeEC %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(responder_info,by="study_id") %>% left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           responder_status=factor(responder_status,levels=c("Non-Responder","Responder")),
+           actual_treatment=factor(actual_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=T),mean_fd_c=mean_fd-mean(mean_fd,na.rm=T)) %>%
+    drop_na(study_id,timepoint,responder_status,actual_treatment,value,age_c,sex,mean_fd_c)
+  model <- lmerTest::lmer(value ~ timepoint*responder_status + timepoint*actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:responder_statusResponder") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,p_value=p.value)
+}
+
+run_PeEC_responder_marker <- function(roi) {
+  dat <- smart_prepostrsfc_PeEC %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(responder_info,by="study_id") %>% left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           responder_status=factor(responder_status,levels=c("Non-Responder","Responder")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=T),mean_fd_c=mean_fd-mean(mean_fd,na.rm=T)) %>%
+    drop_na(study_id,timepoint,responder_status,marker_treatment,value,age_c,sex,mean_fd_c)
+  model <- lmerTest::lmer(value ~ timepoint*responder_status + marker_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:responder_statusResponder") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,p_value=p.value)
+}
+
+PeEC_rsfc_responder_med <- map_dfr(roi_vars_PeEC,run_PeEC_responder_med) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>% ungroup()
+
+PeEC_rsfc_responder_marker <- map_dfr(roi_vars_PeEC,run_PeEC_responder_marker) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>% ungroup()
+
+PeEC_rsfc_responder_compare <- PeEC_rsfc_responder_change_results %>%
+  select(region,beta_original=beta_interaction,p_original=p_value,pfdr_original=pfdr_hemi) %>%
+  left_join(PeEC_rsfc_responder_med %>%
+    select(region,beta_med=beta_interaction,p_med=p_value,pfdr_med=pfdr_hemi),by="region") %>%
+  left_join(PeEC_rsfc_responder_marker %>%
+    select(region,beta_marker=beta_interaction,p_marker=p_value,pfdr_marker=pfdr_hemi),by="region") %>%
+  arrange(pfdr_original)
+```
+##2.3 a24p32
+```{r}
+roi_vars_a24p32 <- names(smart_prepostrsfc_a24p32) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_a24p32 %>% select(timepoint, value = all_of(.x))
+    any(!is.na(dat$value[dat$timepoint == "pre"])) &&
+      any(!is.na(dat$value[dat$timepoint == "post"]))})
+
+run_a24p32_responder_lmer <- function(roi) {
+  
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(responder_info, by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, responder_status, value, age_c, sex, mean_fd_c)
+  
+  n_subjects <- n_distinct(dat$study_id)
+  n_complete <- dat %>% count(study_id) %>% filter(n == 2) %>% nrow()
+  
+  if (n_complete < 8 || n_distinct(dat$responder_status) < 2) {
+    return(tibble(region = roi, n_subjects, n_complete,
+                  beta_interaction = NA_real_, t_value = NA_real_,
+                  df = NA_real_, p_value = NA_real_, singular = NA))}
+  
+  model <- lmerTest::lmer(value ~ timepoint * responder_status + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  
+  broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:responder_statusResponder") %>%
+    transmute(
+      region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_interaction = estimate,
+      t_value = statistic,
+      df = df,
+      p_value = p.value,
+      singular = lme4::isSingular(model))}
+
+a24p32_rsfc_responder_change_results <- map_dfr(roi_vars_a24p32, run_a24p32_responder_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(hemisphere, p_value)
+```
+###2.3.1 post hoc
+```{r}
+run_a24p32_responder_posthoc <- function(roi) {
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(responder_info %>% select(study_id, responder_status) %>% distinct(), by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+           responder_status = factor(responder_status, levels = c("Non-Responder", "Responder"),
+                                     labels = c("Non-Responders", "Responders")),
+           sex = factor(sex), age_c = age - mean(age, na.rm = TRUE),
+           mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, responder_status, value, age_c, sex, mean_fd_c)
+
+  if (nrow(distinct(dat, responder_status, timepoint)) < 4) return(NULL)
+
+  model <- lmerTest::lmer(value ~ timepoint * responder_status + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  emm <- emmeans::emmeans(model, ~ timepoint | responder_status)
+  changes <- emmeans::contrast(emm, "revpairwise") %>% summary() %>% as_tibble()
+  interaction <- emmeans::contrast(emmeans::contrast(emm, "revpairwise"), "revpairwise", by = NULL) %>% summary()
+
+  changes %>%
+    transmute(region = roi, responder_status, change = estimate, SE, df,
+              t_within = t.ratio, p_within = p.value,
+              interaction_estimate = interaction$estimate[1],
+              t_interaction = interaction$t.ratio[1],
+              p_interaction = interaction$p.value[1],
+              n_subjects = n_distinct(dat$study_id)) %>%
+    left_join(dat %>% group_by(responder_status) %>%
+                summarise(n_group = n_distinct(study_id), .groups = "drop"),
+              by = "responder_status")
+}
+
+responder_a24p32_posthoc_results <- purrr::map_dfr(
+  names(smart_prepostrsfc_a24p32) %>% stringr::str_subset("_ROI$"),
+  run_a24p32_responder_posthoc
+)
+
+responder_a24p32_posthoc_results <- responder_a24p32_posthoc_results %>%
+  left_join(
+    distinct(., region, p_interaction) %>%
+      mutate(p_interaction_FDR = p.adjust(p_interaction, method = "BH")) %>%
+      select(region, p_interaction_FDR),
+    by = "region"
+  )
+
+##fishers exact
+run_a24p32_responder_fisher <- function(roi) {
+
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id, timepoint, value = all_of(roi)) %>%
+    left_join(responder_info %>% select(study_id, responder_status) %>% distinct(), by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+           responder_status = factor(responder_status, levels = c("Non-Responder", "Responder"))) %>%
+    drop_na(study_id, timepoint, responder_status, value) %>%
+    pivot_wider(names_from = timepoint, values_from = value) %>%
+    drop_na(pre, post) %>%
+    mutate(change = post - pre,
+           direction = case_when(change > 0 ~ "Increase",
+                                 change < 0 ~ "Decrease",
+                                 TRUE ~ "No Change")) %>%
+    filter(direction != "No Change")
+
+  tab <- table(dat$responder_status, dat$direction)
+  if (nrow(tab) < 2 || ncol(tab) < 2) return(NULL)
+
+  ft <- fisher.test(tab)
+
+  tibble(
+    region = roi,
+    nonresponder_increase = sum(dat$responder_status == "Non-Responder" & dat$direction == "Increase"),
+    nonresponder_decrease = sum(dat$responder_status == "Non-Responder" & dat$direction == "Decrease"),
+    responder_increase = sum(dat$responder_status == "Responder" & dat$direction == "Increase"),
+    responder_decrease = sum(dat$responder_status == "Responder" & dat$direction == "Decrease"),
+    odds_ratio = unname(ft$estimate),
+    p_value = ft$p.value
+  )
+}
+
+significant_responder_rois <- a24p32_rsfc_responder_change_results %>%
+  filter(pfdr_hemi < .05) %>% pull(region)
+
+responder_a24p32_fisher <- map_dfr(significant_responder_rois, run_a24p32_responder_fisher) %>%
+  mutate(hemisphere = case_when(
+    str_detect(region, "^L_") ~ "Left",
+    str_detect(region, "^R_") ~ "Right",
+    TRUE ~ "Other"
+  ))
+
+responder_a24p32_fisher_table <- responder_a24p32_fisher %>%
+  mutate(
+    nonresponder_n = nonresponder_increase + nonresponder_decrease,
+    responder_n = responder_increase + responder_decrease,
+    `Non-Responder Increase` = sprintf("%d (%.1f%%)", nonresponder_increase, 100*nonresponder_increase/nonresponder_n),
+    `Non-Responder Decrease` = sprintf("%d (%.1f%%)", nonresponder_decrease, 100*nonresponder_decrease/nonresponder_n),
+    `Responder Increase` = sprintf("%d (%.1f%%)", responder_increase, 100*responder_increase/responder_n),
+    `Responder Decrease` = sprintf("%d (%.1f%%)", responder_decrease, 100*responder_decrease/responder_n),
+    OR = round(odds_ratio, 2),
+    p = if_else(p_value < .001, "< .001", sprintf("%.3f", p_value))
+  ) %>%
+  select(region, hemisphere, `Non-Responder Increase`, `Non-Responder Decrease`,
+         `Responder Increase`, `Responder Decrease`, OR, p)
+
+responder_a24p32_fisher_table
+
+binomial_results <- smart_prepostrsfc_a24p32 %>%
+  select(study_id, timepoint, R_TE1m_ROI, R_TE1p_ROI, R_PHT_ROI) %>%
+  pivot_longer(ends_with("_ROI"), names_to = "region", values_to = "rsfc") %>%
+  pivot_wider(names_from = timepoint, values_from = rsfc) %>%
+  left_join(responder_info %>% distinct(study_id, responder_status), by = "study_id") %>%
+  mutate(change = post - pre) %>%
+  filter(!is.na(change), change != 0, !is.na(responder_status)) %>%
+  group_by(region, responder_status) %>%
+  summarise(n = n(), n_increase = sum(change > 0),
+            pct_increase = 100 * n_increase / n,
+            p_binomial = binom.test(n_increase, n, p = 0.5)$p.value,
+            .groups = "drop")
+
+binomial_results
+```
+####2.3.1.2 plot post hoc
+```{r}
+responder_plot_dat <- responder_a24p32_posthoc_results %>%
+  filter(region %in% (a24p32_rsfc_responder_change_results %>%
+                        filter(pfdr_hemi < .05) %>% pull(region))) %>%
+  mutate(
+    region_label = str_replace_all(str_remove(region, "_ROI$"), "_", " "),
+    region_label = fct_reorder(region_label, change),
+    y_pos = as.numeric(region_label) + ifelse(responder_status == "Responder", .2, -.2),
+    ci_low = change - qt(.975, df) * SE,
+    ci_high = change + qt(.975, df) * SE,
+    p_label = ifelse(p_within < .001, "p < .001", sprintf("p = %.3f", p_within)))
+
+label_position <- max(responder_plot_dat$ci_high, na.rm = TRUE) + .3
+
+ggplot(responder_plot_dat, aes(x = change, y = y_pos, color = responder_status)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_errorbarh(aes(xmin = ci_low, xmax = ci_high), height = .12) +
+  geom_point(aes(shape = p_within < .05), size = 3.5, stroke = 1.2) +
+  scale_shape_manual(values = c("TRUE" = 16, "FALSE" = 1), guide = "none") +
+  geom_text(aes(x = label_position, label = p_label),
+            hjust = 0, size = 4, show.legend = FALSE) +
+  scale_y_continuous(
+    breaks = seq_along(levels(responder_plot_dat$region_label)),
+    labels = levels(responder_plot_dat$region_label)) +
+  scale_color_manual(values = c("Non-Responder" = "#FF5A5F", "Responder" = "#00AEB3")) +
+  coord_cartesian(xlim = c(min(responder_plot_dat$ci_low) - .4, label_position + 1.3)) +
+  labs(title = "Pre-to-Post Change in pgACC Connectivity",
+       x = "Estimated mean change (Post - Pre)",
+       y = NULL, color = "Response status") +
+  theme_classic(base_size = 15) +
+  theme(
+    plot.title = element_text(size = 16),
+    axis.title.x = element_text(size = 16),
+    axis.text.x = element_text(size = 16),
+    axis.text.y = element_text(size = 16, margin = margin(r = 2)),
+    axis.ticks.length.y = grid::unit(2, "pt"),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    legend.position = "bottom",
+    legend.margin = margin(t = -5),
+    legend.box.margin = margin(t = -10),
+    legend.spacing.y = grid::unit(0, "pt"),
+    plot.margin = margin(5, 5, 0, 5),
+    plot.background = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    legend.key = element_rect(fill = "transparent", color = NA))
+
+ggsave("pgACC_responder_change.png",width=9,height=5,dpi=300,bg="transparent")
+```
+
+###2.3.2 a24p32, covariate for meds
+```{r}
+# meds
+roi_vars_a24p32 <- names(smart_prepostrsfc_a24p32) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_a24p32 %>% select(timepoint, value=all_of(.x))
+  any(!is.na(dat$value[dat$timepoint=="pre"])) && any(!is.na(dat$value[dat$timepoint=="post"]))})
+
+run_a24p32_responder_lmer <- function(roi) {
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(responder_info,by="study_id") %>% left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           responder_status=factor(responder_status,levels=c("Non-Responder","Responder")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")), sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE), mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,responder_status,actual_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*responder_status + timepoint*actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id), data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:responder_statusResponder") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+a24p32_rsfc_responder_change_results_meds <- map_dfr(roi_vars_a24p32,run_a24p32_responder_lmer) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+#marker
+run_a24p32_responder_lmer <- function(roi) {
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(responder_info,by="study_id") %>% left_join(treatment_info,by="study_id") %>%
+    left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           responder_status=factor(responder_status,levels=c("Non-Responder","Responder")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,responder_status,actual_treatment,marker_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*responder_status + timepoint*marker_treatment +
+                             age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:responder_statusResponder") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+a24p32_rsfc_responder_marker <- map_dfr(roi_vars_a24p32,run_a24p32_responder_lmer) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+a24p32_rsfc_responder_change_withmarker_compare <- a24p32_rsfc_responder_change_results %>%
+  select(region,beta_original=beta_interaction,p_original=p_value,pfdr_original=pfdr_hemi) %>%
+  left_join(a24p32_rsfc_responder_change_results_meds %>%
+    select(region,beta_med=beta_interaction,p_med=p_value,pfdr_med=pfdr_hemi),by="region") %>%
+  left_join(a24p32_rsfc_responder_marker %>%
+    select(region,beta_marker=beta_interaction,p_marker=p_value,pfdr_marker=pfdr_hemi),by="region") %>%
+  arrange(pfdr_marker)
+
+```
+###2.3.3 plot significant roi for response, a24p32
+```{r}
+make_spaghetti_a24p32 <- function(roi) {
+  dat <- smart_prepostrsfc_a24p32 %>%
+  select(study_id, timepoint, value = all_of(roi)) %>%
+    left_join(smart_prepost_trt %>% select(study_id, responder_status) %>% distinct(), by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, c("pre", "post")),
+           responder_status = factor(responder_status,
+                                     levels = c("Non-Responder", "Responder"),
+                                     labels = c("Non-Responders", "Responders"))) %>%
+    drop_na(study_id, timepoint, responder_status, value)
+
+  ggplot(dat, aes(timepoint, value, group = study_id)) +
+    geom_line(alpha = .2, linewidth = .35) + geom_point(size = 1.5, alpha = .55) +
+    stat_summary(aes(group = responder_status), fun = mean, geom = "line", linewidth = 1.2) +
+    stat_summary(fun = mean, geom = "point", size = 3) +
+    stat_summary(fun.data = mean_se, geom = "errorbar", width = .08) +
+    facet_wrap(~responder_status) + theme_classic() +
+    theme(axis.text = element_text(size = 16), axis.title = element_text(size = 14),
+          strip.text = element_text(size = 16, face = "bold"),
+          plot.title = element_text(size = 16, face = "bold", hjust = .5)) +
+    labs(title = roi %>% str_remove("_ROI$") %>% str_replace("^R_", "Right ") %>% str_replace("^L_", "Left "),
+         x = "Timepoint", y = "pgACC-seeded rsFC")
+}
+
+
+p_PHT  <- make_spaghetti_a24p32("R_PHT_ROI")
+p_TE1m <- make_spaghetti_a24p32("R_TE1m_ROI")
+p_TE1p <- make_spaghetti_a24p32("R_TE1p_ROI")
+
+ggsave("Response_pgACC_R_PHT.png",  p_PHT,  width = 5, height = 5, dpi = 600)
+ggsave("Response_pgACC_R_TE1m.png", p_TE1m, width = 5, height = 5, dpi = 600)
+ggsave("Response_pgACC_R_TE1p.png", p_TE1p, width = 5, height = 5, dpi = 600)
+```
+### 2.3.4 plot brain maps
+```{r}
+glasser_atlas <- ggsegGlasser::glasser
+
+a24p32_brain_results <- a24p32_rsfc_responder_change_results %>%
+  transmute(original_roi = region, t_value, p_value, pfdr_hemi,
+            parcel = region %>% str_remove("^[LR]_") %>% str_remove("_ROI$"),
+            label = case_when(str_detect(region, "^L_") ~ paste0("lh_L_", parcel),
+                              str_detect(region, "^R_") ~ paste0("rh_R_", parcel), TRUE ~ NA_character_),
+            significant = !is.na(pfdr_hemi) & pfdr_hemi < 0.05)
+
+plot_data <- glasser_atlas$data %>%
+  left_join(a24p32_brain_results, by = "label")
+
+t_limit <- max(abs(a24p32_brain_results$t_value), na.rm = TRUE)
+
+ResponderChange_pgACC <- ggplot() +
+  geom_sf(data = plot_data, aes(fill = t_value),
+          colour = "grey50", linewidth = 0.15) +
+  geom_sf(data = plot_data %>% filter(significant),
+          fill = NA, colour = "black", linewidth = 0.6) +
+  geom_sf(data = plot_data %>%
+            filter(label %in% c("lh_L_a24", "rh_R_a24",
+                                "lh_L_p32", "rh_R_p32")),
+          fill = "#008080", colour = "#008080", linewidth = 0.8) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       midpoint = 0, limits = c(-t_limit, t_limit),
+                       na.value = "grey92", name = "t statistic") +
+  labs(title = "Pre-to-Post rsFC Change Differs by Responder Status",
+       subtitle = "Cortical connectivity with pgACC",
+       caption = "Black outline: pFDR < .05\nTeal: pgACC seed (a24 and p32)") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.caption = element_text(hjust = 0.5))
+
+ResponderChange_pgACC
+
+ggsave("ResponderChange_pgACC.png", plot = ResponderChange_pgACC, width = 10, height = 6, units = "in", dpi = 600)
+```
+##2.4 p24a32pr
+```{r}
+roi_vars_p24a32pr <- names(smart_prepostrsfc_p24a32pr) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_p24a32pr %>% select(timepoint, value = all_of(.x))
+    any(!is.na(dat$value[dat$timepoint == "pre"])) &&
+      any(!is.na(dat$value[dat$timepoint == "post"]))})
+
+run_p24a32pr_responder_lmer <- function(roi) {
+  
+  dat <- smart_prepostrsfc_p24a32pr %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(responder_info, by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, responder_status, value, age_c, sex, mean_fd_c)
+  
+  n_subjects <- n_distinct(dat$study_id)
+  n_complete <- dat %>% count(study_id) %>% filter(n == 2) %>% nrow()
+  
+  if (n_complete < 8 || n_distinct(dat$responder_status) < 2) {
+    return(tibble(region = roi, n_subjects, n_complete,
+                  beta_interaction = NA_real_, t_value = NA_real_,
+                  df = NA_real_, p_value = NA_real_, singular = NA))}
+  
+  model <- lmerTest::lmer(value ~ timepoint * responder_status + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  
+  broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:responder_statusResponder") %>%
+    transmute(
+      region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_interaction = estimate,
+      t_value = statistic,
+      df = df,
+      p_value = p.value,
+      singular = lme4::isSingular(model))}
+
+p24a32pr_rsfc_responder_change_results <- map_dfr(roi_vars_p24a32pr, run_p24a32pr_responder_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(hemisphere, p_value)
+```
+### 2.4.1 covariate for meds
+```{r}
+roi_vars_p24a32pr <- names(smart_prepostrsfc_p24a32pr) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_p24a32pr %>% select(timepoint,value=all_of(.x))
+  any(!is.na(dat$value[dat$timepoint=="pre"])) && any(!is.na(dat$value[dat$timepoint=="post"]))})
+
+# meds
+run_p24a32pr_responder_lmer <- function(roi) {
+  dat <- smart_prepostrsfc_p24a32pr %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(responder_info,by="study_id") %>% left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           responder_status=factor(responder_status,levels=c("Non-Responder","Responder")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,responder_status,actual_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*responder_status + timepoint*actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:responder_statusResponder") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_p24a32pr_responder_change_results_meds <- map_dfr(roi_vars_p24a32pr,run_p24a32pr_responder_lmer) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+#marker
+run_p24a32pr_responder_lmer <- function(roi) {
+  dat <- smart_prepostrsfc_p24a32pr %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(responder_info,by="study_id") %>% left_join(treatment_info,by="study_id") %>%
+    left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           responder_status=factor(responder_status,levels=c("Non-Responder","Responder")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,responder_status,actual_treatment,marker_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*responder_status + timepoint*marker_treatment
+                             + age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:responder_statusResponder") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_p24a32pr_responder_marker <- map_dfr(roi_vars_p24a32pr,run_p24a32pr_responder_lmer) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+rsfc_p24a32pr_responder_change_withmarker_compare <- p24a32pr_rsfc_responder_change_results %>%
+  select(region,beta_original=beta_interaction,p_original=p_value,pfdr_original=pfdr_hemi) %>%
+  left_join(rsfc_p24a32pr_responder_change_results_meds %>%
+    select(region,beta_med=beta_interaction,p_med=p_value,pfdr_med=pfdr_hemi),by="region") %>%
+  left_join(rsfc_p24a32pr_responder_marker %>%
+    select(region,beta_marker=beta_interaction,p_marker=p_value,pfdr_marker=pfdr_hemi),by="region") %>%
+  arrange(pfdr_marker)
+```
+#3.if remitters vs non remitters differ in rsfc
+##3.1 25
+```{r}
+roi_vars_25 <- names(smart_prepostrsfc_25) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_25 %>% select(timepoint, value = all_of(.x))
+    any(!is.na(dat$value[dat$timepoint == "pre"])) &&
+      any(!is.na(dat$value[dat$timepoint == "post"]))})
+
+run_25_remission_lmer <- function(roi) {
+  
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(remission_info, by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, remission_status, value, age_c, sex, mean_fd_c)
+  
+  n_subjects <- n_distinct(dat$study_id)
+  n_complete <- dat %>% count(study_id) %>% filter(n == 2) %>% nrow()
+  
+  if (n_complete < 8 || n_distinct(dat$remission_status) < 2) {
+    return(tibble(region = roi, n_subjects, n_complete,
+                  beta_interaction = NA_real_, t_value = NA_real_,
+                  df = NA_real_, p_value = NA_real_, singular = NA))}
+  
+  model <- lmerTest::lmer(value ~ timepoint * remission_status + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  
+  broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:remission_statusRemitter") %>%
+    transmute(
+      region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_interaction = estimate,
+      t_value = statistic,
+      df = df,
+      p_value = p.value,
+      singular = lme4::isSingular(model))}
+
+rsfc_25_remission_change_results <- map_dfr(roi_vars_25, run_25_remission_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(hemisphere, p_value)
+
+rsfc_25_remission_change_results
+```
+###3.1.1 plot significant roi for remission
+```{r}
+make_spaghetti_remission <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id, timepoint, value = all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id, remission_status), by="study_id") %>%
+    mutate(timepoint=factor(timepoint,c("pre","post")),
+           remission_status=factor(remission_status,
+                                   levels=c("Non-Remitter","Remitter"),
+                                   labels=c("Non-Remitters","Remitters"))) %>%
+    drop_na(study_id,timepoint,remission_status,value)
+
+  ggplot(dat, aes(timepoint,value,group=study_id)) +
+    geom_line(alpha=.2,linewidth=.35) + geom_point(size=1.5,alpha=.55) +
+    stat_summary(aes(group=remission_status),fun=mean,geom="line",linewidth=1.2) +
+    stat_summary(fun=mean,geom="point",size=3) +
+    stat_summary(fun.data=mean_se,geom="errorbar",width=.08) +
+    facet_wrap(~remission_status) + theme_classic() +
+    theme(axis.text=element_text(size=14),axis.title=element_text(size=14),
+          strip.text=element_text(size=14,face="bold"),
+          plot.title=element_text(size=14,face="bold",hjust=.5)) +
+    labs(title=roi %>% str_remove("_ROI$") %>% str_replace("^R_","Right ") %>% str_replace("^L_","Left "),
+         x="Timepoint",y="BA25-seeded rsFC")
+}
+
+p_8Ad  <- make_spaghetti_remission("L_8Ad_ROI")
+p_TE1m <- make_spaghetti_remission("L_TE1m_ROI")
+
+ggsave("Remission_sgACC_L_8Ad.png", p_8Ad, width=6, height=4, dpi=600)
+ggsave("Remission_sgACC_L_TE1m.png", p_TE1m, width=6, height=4, dpi=600)
+```
+###3.1.2 plot brain maps
+```{r}
+glasser_atlas <- ggsegGlasser::glasser
+
+remission_25_brain_results <- rsfc_25_remission_change_results %>%
+  transmute(t_value, p_value, pfdr_hemi, parcel = str_remove(str_remove(region, "^[LR]_"), "_ROI$"),
+            label = if_else(str_detect(region, "^L_"), paste0("lh_L_", parcel), paste0("rh_R_", parcel)),
+            significant = pfdr_hemi < .05)
+
+plot_data <- glasser_atlas$data %>% left_join(remission_25_brain_results, by = "label")
+t_limit <- max(abs(remission_25_brain_results$t_value), na.rm = TRUE)
+
+RemissionChange_sgACC <- ggplot() +
+  geom_sf(data = plot_data, aes(fill = t_value), colour = "grey50", linewidth = .15) +
+  geom_sf(data = filter(plot_data, significant), fill = NA, colour = "black", linewidth = .6) +
+  geom_sf(data = filter(plot_data, label %in% c("lh_L_25","rh_R_25")), fill = "#008080", colour = "#008080", linewidth = .8) +
+  scale_fill_gradient2(low="#2166AC", mid="white", high="#B2182B", midpoint=0, limits=c(-t_limit,t_limit), na.value="grey92", name="t statistic") +
+  labs(title="Pre-to-Post rsFC Change Differs by Remission Status", subtitle="Cortical connectivity with sgACC",
+       caption="Black outline: pFDR < .05\nTeal: sgACC seed (BA25)") +
+  theme_void() + theme(legend.position="bottom", plot.title=element_text(face="bold",hjust=.5),
+                       plot.subtitle=element_text(hjust=.5), plot.caption=element_text(hjust=.5))
+
+RemissionChange_sgACC
+
+ggsave("RemissionChange_sgACC.png", plot = RemissionChange_sgACC,
+       width = 10, height = 6, units = "in", dpi = 600)
+```
+###3.1.3 post hoc
+```{r}
+roi_vars_25 <- names(smart_prepostrsfc_25) %>% str_subset("_ROI$")
+remission_lookup <- remission_info %>%
+  select(study_id, remission_status) %>% distinct(study_id, .keep_all = TRUE)
+
+run_25_remission_posthoc <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(remission_lookup, by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+           remission_status = factor(remission_status, levels = c("Non-Remitter", "Remitter")),
+           sex = factor(sex), age_c = age - mean(age, na.rm = TRUE),
+           mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, remission_status, value, age_c, sex, mean_fd_c)
+
+  if (nrow(distinct(dat, remission_status, timepoint)) < 4) return(NULL)
+
+  model <- lmer(value ~ timepoint * remission_status + age_c + sex +
+                  mean_fd_c + (1 | study_id), data = dat)
+  emm <- emmeans(model, ~ timepoint | remission_status)
+  changes <- summary(contrast(emm, "revpairwise")) %>% as_tibble()
+  interaction_test <- summary(contrast(
+    contrast(emm, "revpairwise"), "revpairwise", by = NULL))
+
+  changes %>%
+    transmute(region = roi, remission_status, change = estimate, SE, df,
+              t_within = t.ratio, p_within = p.value,
+              interaction_estimate = interaction_test$estimate[1],
+              t_interaction = interaction_test$t.ratio[1],
+              p_interaction = interaction_test$p.value[1],
+              n_subjects = n_distinct(dat$study_id),
+              singular = lme4::isSingular(model)) %>%
+    left_join(dat %>% distinct(study_id, remission_status) %>%
+                count(remission_status, name = "n_group"), by = "remission_status")}
+
+remission_25_posthoc_results <- map_dfr(roi_vars_25, run_25_remission_posthoc) %>%
+  mutate(hemisphere = str_extract(region, "^[LR]")) %>%
+  left_join(
+    distinct(., region, hemisphere, p_interaction) %>%
+      group_by(hemisphere) %>%
+      mutate(p_interaction_FDR = p.adjust(p_interaction, "BH")) %>%
+      ungroup() %>% select(region, p_interaction_FDR),
+    by = "region") %>%
+  mutate(hemisphere = recode(hemisphere, L = "Left", R = "Right")) %>%
+  arrange(region, remission_status)
+
+View(remission_25_posthoc_results)
+
+rsfc_remission_25 <- smart_prepostrsfc_25 %>%
+  select(study_id, timepoint, all_of(roi_vars_25)) %>%
+  pivot_longer(all_of(roi_vars_25), names_to = "region", values_to = "rsfc") %>%
+  pivot_wider(names_from = timepoint, values_from = rsfc) %>%
+  left_join(remission_lookup, by = "study_id") %>%
+  mutate(change = post - pre,
+         hemisphere = recode(str_extract(region, "^[LR]"), L = "Left", R = "Right"),
+         reason = case_when(
+           is.na(remission_status) ~ "Missing remission status",
+           is.na(pre) ~ "Missing pre rsFC",
+           is.na(post) ~ "Missing post rsFC",
+           change == 0 ~ "Zero change",
+           TRUE ~ "Included"))
+
+rsfc_remission_complete_25 <- rsfc_remission_25 %>%
+  filter(reason == "Included") %>%
+  mutate(direction = if_else(change > 0, "Increase", "Decrease"))
+
+significant_remission_rois <- rsfc_25_remission_change_results %>%
+  filter(!is.na(pfdr_hemi), pfdr_hemi < .05) %>%
+  pull(region) %>% unique()
+
+run_25_remission_fisher <- function(d) {
+  tab <- table(
+    factor(d$remission_status, levels = c("Remitter", "Non-Remitter")),
+    factor(d$direction, levels = c("Increase", "Decrease")))
+  if (any(rowSums(tab) == 0)) return(tibble())
+
+  ft <- fisher.test(tab)
+  tibble(nonremitter_increase = unname(tab[2, 1]),
+         nonremitter_decrease = unname(tab[2, 2]),
+         remitter_increase = unname(tab[1, 1]),
+         remitter_decrease = unname(tab[1, 2]),
+         odds_ratio = unname(ft$estimate), p_value = ft$p.value)}
+
+remission_25_fisher <- rsfc_remission_complete_25 %>%
+  filter(region %in% significant_remission_rois) %>%
+  group_by(region, hemisphere) %>%
+  group_modify(~ run_25_remission_fisher(.x)) %>%
+  ungroup()
+
+format_n_pct <- function(n, total) sprintf("%d (%.1f%%)", n, 100 * n / total)
+format_p <- function(p) ifelse(p < .001, "< .001", sprintf("%.3f", p))
+
+remission_25_fisher_table <- remission_25_fisher %>%
+  mutate(
+    nonremitter_n = nonremitter_increase + nonremitter_decrease,
+    remitter_n = remitter_increase + remitter_decrease,
+    `Non-Remitter Increase` = format_n_pct(nonremitter_increase, nonremitter_n),
+    `Non-Remitter Decrease` = format_n_pct(nonremitter_decrease, nonremitter_n),
+    `Remitter Increase` = format_n_pct(remitter_increase, remitter_n),
+    `Remitter Decrease` = format_n_pct(remitter_decrease, remitter_n),
+    OR = round(odds_ratio, 2), p = format_p(p_value)) %>%
+  select(region, hemisphere, `Non-Remitter Increase`, `Non-Remitter Decrease`,
+         `Remitter Increase`, `Remitter Decrease`, OR, p)
+
+remission_25_fisher_table
+
+remission_25_posthoc <- remission_25_fisher_table %>%
+  gt() %>%
+  tab_header(title = md("**Table X**"),
+             subtitle = md("*Direction of Resting-State Functional Connectivity Change by Remission Status*")) %>%
+  tab_spanner("Non-Remitters", columns = c(`Non-Remitter Increase`, `Non-Remitter Decrease`)) %>%
+  tab_spanner("Remitters", columns = c(`Remitter Increase`, `Remitter Decrease`)) %>%
+  cols_label(region = "Region", hemisphere = "Hemisphere",
+             `Non-Remitter Increase` = "Increase, n (%)",
+             `Non-Remitter Decrease` = "Decrease, n (%)",
+             `Remitter Increase` = "Increase, n (%)",
+             `Remitter Decrease` = "Decrease, n (%)",
+             OR = "OR", p = md("*p*")) %>%
+  cols_align("left", columns = c(region, hemisphere)) %>%
+  cols_align("center", columns = -c(region, hemisphere)) %>%
+  tab_source_note(md(
+    "*Note.* Values represent participants with increased or decreased rsFC from pre- to post-treatment. Zero changes and missing observations were excluded. Fisher's exact tests compared the direction of rsFC change between remitters and non-remitters. OR = odds ratio for increased versus decreased rsFC in remitters relative to non-remitters."))
+
+gtsave(remission_25_posthoc, "remission_25_posthoc.rtf")
+
+target_rois <- c("L_8Ad_ROI", "L_TE1m_ROI")
+
+binomial_results <- rsfc_remission_complete_25 %>%
+  filter(region %in% target_rois) %>%
+  group_by(region, remission_status) %>%
+  summarise(n = n(), n_increase = sum(change > 0),
+            pct_increase = 100 * n_increase / n,
+            p_binomial = binom.test(n_increase, n, p = 0.5)$p.value,
+            .groups = "drop")
+
+binomial_results
+
+exclusion_summary <- rsfc_remission_25 %>%
+  filter(region %in% target_rois) %>%
+  count(region, remission_status, reason)
+
+excluded_participants <- rsfc_remission_25 %>%
+  filter(region %in% target_rois, reason != "Included") %>%
+  select(study_id, region, remission_status, pre, post, change, reason)
+
+View(exclusion_summary)
+View(excluded_participants)
+```
+####3.1.3.1 plot post hoc
+```{r}
+remitter_plot_dat <- remission_25_posthoc_results %>%
+  mutate(region_label = region %>% str_remove("^[LR]_") %>% str_remove("_ROI$"),
+         ci_low = change - 1.96 * SE,
+         ci_high = change + 1.96 * SE,
+         responder_status = factor(remission_status, levels = c("Non-Remitter", "Remitter")), significant = pfdr_posthoc < 0.05)
+
+remitter_plot_dat <- remitter_plot_dat %>%
+  mutate(p_label = case_when(pfdr_posthoc < 0.001 ~ "pFDR < .001", pfdr_posthoc < 0.05  ~ paste0( "pFDR = ", sprintf("%.3f", pfdr_posthoc)), TRUE ~ "" ))
+
+label_position <- max(remitter_plot_dat$ci_high, na.rm = TRUE) + 0.3
+
+ggplot(remitter_plot_dat,
+  aes(x = change, y = fct_reorder(region_label, change), color = remission_status)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_errorbarh(aes(xmin = ci_low, xmax = ci_high), height = 0.12, position = position_dodge(width = 0.55)) +
+  geom_point(aes(shape = significant), size = 3.5, position = position_dodge(width = 0.55)) +
+  geom_text(aes(x = label_position, label = p_label),
+            position = position_dodge(width = 0.55),
+            hjust = 0,
+            size = 3,
+            show.legend = FALSE) +
+  scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1)) +
+  coord_cartesian(xlim = c( min(remitter_plot_dat$ci_low, na.rm = TRUE) - 0.2, label_position + 1)) +
+  labs(title = "Pre-to-Post Change in sgACC Connectivity",
+       x = "Estimated change, post-pre",
+       y = NULL,
+       color = "Remission status",
+       shape = "FDR significant") +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+###3.1.4 covariate for meds and marker
+```{r}
+run_25_remission_lmer <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info,by="study_id") %>% left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           remission_status=factor(remission_status,levels=c("Non-Remitter","Remitter")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,remission_status,actual_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*remission_status + timepoint*actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:remission_statusRemitter") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_25_remission_change_results_med <- map_dfr(roi_vars_25,run_25_remission_lmer) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+run_25_remission_lmer <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info,by="study_id") %>% left_join(treatment_info,by="study_id") %>%
+    left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           remission_status=factor(remission_status,levels=c("Non-Remitter","Remitter")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,remission_status,actual_treatment,marker_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*remission_status + timepoint*marker_treatment
+                             + age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:remission_statusRemitter") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_25_remission_marker <- map_dfr(roi_vars_25,run_25_remission_lmer) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+rsfc_25_remission_withmarker_compare <- rsfc_25_remission_change_results %>%
+  select(region,beta_original=beta_interaction,p_original=p_value,pfdr_original=pfdr_hemi) %>%
+  left_join(rsfc_25_remission_change_results_med %>%
+    select(region,beta_med=beta_interaction,p_med=p_value,pfdr_med=pfdr_hemi),by="region") %>%
+  left_join(rsfc_25_remission_marker %>%
+    select(region,beta_marker=beta_interaction,p_marker=p_value,pfdr_marker=pfdr_hemi),by="region") %>%
+  arrange(pfdr_marker)
+
+```
+
+##3.2 PeEC, EC, Hipp, Pres
+```{r}
+roi_vars_PeEC <- names(smart_prepostrsfc_PeEC) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_PeEC %>% select(timepoint, value = all_of(.x))
+    any(!is.na(dat$value[dat$timepoint == "pre"])) &&
+      any(!is.na(dat$value[dat$timepoint == "post"]))})
+
+run_PeEC_remission_lmer <- function(roi) {
+  
+  dat <- smart_prepostrsfc_PeEC %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(remission_info, by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, remission_status, value, age_c, sex, mean_fd_c)
+  
+  n_subjects <- n_distinct(dat$study_id)
+  n_complete <- dat %>% count(study_id) %>% filter(n == 2) %>% nrow()
+  
+  if (n_complete < 8 || n_distinct(dat$remission_status) < 2) {
+    return(tibble(region = roi, n_subjects, n_complete,
+                  beta_interaction = NA_real_, t_value = NA_real_,
+                  df = NA_real_, p_value = NA_real_, singular = NA))}
+  
+  model <- lmerTest::lmer(value ~ timepoint * remission_status + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  
+  broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:remission_statusRemitter") %>%
+    transmute(
+      region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_interaction = estimate,
+      t_value = statistic,
+      df = df,
+      p_value = p.value,
+      singular = lme4::isSingular(model))}
+
+PeEC_rsfc_remission_change_results <- map_dfr(roi_vars_PeEC, run_PeEC_remission_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(hemisphere, p_value)
+
+
+```
+###3.2.1 covariate for med and marker
+```{r}
+run_PeEC_remission_med <- function(roi) {
+  dat <- smart_prepostrsfc_PeEC %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info,by="study_id") %>% left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           remission_status=factor(remission_status,levels=c("Non-Remitter","Remitter")),
+           actual_treatment=factor(actual_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=T),mean_fd_c=mean_fd-mean(mean_fd,na.rm=T)) %>%
+    drop_na(study_id,timepoint,remission_status,actual_treatment,value,age_c,sex,mean_fd_c)
+  model <- lmerTest::lmer(value ~ timepoint*remission_status + timepoint*actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:remission_statusRemitter") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,p_value=p.value)}
+
+run_PeEC_remission_marker <- function(roi) {
+  dat <- smart_prepostrsfc_PeEC %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info,by="study_id") %>% left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           remission_status=factor(remission_status,levels=c("Non-Remitter","Remitter")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=T),mean_fd_c=mean_fd-mean(mean_fd,na.rm=T)) %>%
+    drop_na(study_id,timepoint,remission_status,marker_treatment,value,age_c,sex,mean_fd_c)
+  model <- lmerTest::lmer(value ~ timepoint*remission_status + marker_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:remission_statusRemitter") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,p_value=p.value)
+}
+
+PeEC_rsfc_remission_med <- map_dfr(roi_vars_PeEC,run_PeEC_remission_med) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>% ungroup()
+
+PeEC_rsfc_remission_marker <- map_dfr(roi_vars_PeEC,run_PeEC_remission_marker) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>% ungroup()
+
+PeEC_rsfc_remission_compare <- PeEC_rsfc_remission_change_results %>%
+  select(region,beta_original=beta_interaction,p_original=p_value,pfdr_original=pfdr_hemi) %>%
+  left_join(PeEC_rsfc_remission_med %>%
+    select(region,beta_med=beta_interaction,p_med=p_value,pfdr_med=pfdr_hemi),by="region") %>%
+  left_join(PeEC_rsfc_remission_marker %>%
+    select(region,beta_marker=beta_interaction,p_marker=p_value,pfdr_marker=pfdr_hemi),by="region") %>%
+  arrange(pfdr_original)
+```
+
+##3.3 a24p32
+```{r}
+roi_vars_a24p32 <- names(smart_prepostrsfc_a24p32) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_a24p32 %>% select(timepoint, value = all_of(.x))
+    any(!is.na(dat$value[dat$timepoint == "pre"])) &&
+      any(!is.na(dat$value[dat$timepoint == "post"]))})
+
+run_a24p32_remission_lmer <- function(roi) {
+  
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(remission_info, by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, remission_status, value, age_c, sex, mean_fd_c)
+  
+  n_subjects <- n_distinct(dat$study_id)
+  n_complete <- dat %>% count(study_id) %>% filter(n == 2) %>% nrow()
+  
+  if (n_complete < 8 || n_distinct(dat$remission_status) < 2) {
+    return(tibble(region = roi, n_subjects, n_complete,
+                  beta_interaction = NA_real_, t_value = NA_real_,
+                  df = NA_real_, p_value = NA_real_, singular = NA))}
+  
+  model <- lmerTest::lmer(value ~ timepoint * remission_status + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  
+  broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:remission_statusRemitter") %>%
+    transmute(
+      region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_interaction = estimate,
+      t_value = statistic,
+      df = df,
+      p_value = p.value,
+      singular = lme4::isSingular(model))}
+
+a24p32_rsfc_remission_change_results <- map_dfr(roi_vars_a24p32, run_a24p32_remission_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(hemisphere, p_value)
+```
+###3.3.1 covariate for med and marker
+```{r}
+run_a24p32_remission_med <- function(roi) {
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info,by="study_id") %>% left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           remission_status=factor(remission_status,levels=c("Non-Remitter","Remitter")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,remission_status,actual_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*remission_status + timepoint*actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:remission_statusRemitter") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+a24p32_rsfc_remission_med <- map_dfr(roi_vars_a24p32,run_a24p32_remission_med) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+run_a24p32_remission_marker <- function(roi) {
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info,by="study_id") %>% left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           remission_status=factor(remission_status,levels=c("Non-Remitter","Remitter")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,remission_status,marker_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*remission_status + marker_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:remission_statusRemitter") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+a24p32_rsfc_remission_marker <- map_dfr(roi_vars_a24p32,run_a24p32_remission_marker) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+a24p32_rsfc_remission_compare <- a24p32_rsfc_remission_change_results %>%
+  select(region,beta_original=beta_interaction,p_original=p_value,pfdr_original=pfdr_hemi) %>%
+  left_join(a24p32_rsfc_remission_med %>%
+    select(region,beta_med=beta_interaction,p_med=p_value,pfdr_med=pfdr_hemi),by="region") %>%
+  left_join(a24p32_rsfc_remission_marker %>%
+    select(region,beta_marker=beta_interaction,p_marker=p_value,pfdr_marker=pfdr_hemi),by="region") %>%
+  arrange(pfdr_original)
+
+```
+
+##3.4 p24a32pr
+```{r}
+roi_vars_p24a32pr <- names(smart_prepostrsfc_p24a32pr) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_p24a32pr %>% select(timepoint, value = all_of(.x))
+    any(!is.na(dat$value[dat$timepoint == "pre"])) &&
+      any(!is.na(dat$value[dat$timepoint == "post"]))})
+
+run_p24a32pr_remission_lmer <- function(roi) {
+  
+  dat <- smart_prepostrsfc_p24a32pr %>%
+    select(study_id, timepoint, age, sex, mean_fd, value = all_of(roi)) %>%
+    left_join(remission_info, by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+      sex = factor(sex),
+      age_c = age - mean(age, na.rm = TRUE),
+      mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id, timepoint, remission_status, value, age_c, sex, mean_fd_c)
+  
+  n_subjects <- n_distinct(dat$study_id)
+  n_complete <- dat %>% count(study_id) %>% filter(n == 2) %>% nrow()
+  
+  if (n_complete < 8 || n_distinct(dat$remission_status) < 2) {
+    return(tibble(region = roi, n_subjects, n_complete,
+                  beta_interaction = NA_real_, t_value = NA_real_,
+                  df = NA_real_, p_value = NA_real_, singular = NA))}
+  
+  model <- lmerTest::lmer(value ~ timepoint * remission_status + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+  
+  broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:remission_statusRemitter") %>%
+    transmute(
+      region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_interaction = estimate,
+      t_value = statistic,
+      df = df,
+      p_value = p.value,
+      singular = lme4::isSingular(model))}
+
+p24a32pr_rsfc_remission_change_results <- map_dfr(roi_vars_p24a32pr, run_p24a32pr_remission_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(hemisphere, p_value)
+```
+###3.4.1 covariate for med and marker
+```{r}
+run_p24a32pr_remission_med <- function(roi) {
+  dat <- smart_prepostrsfc_p24a32pr %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info,by="study_id") %>% left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           remission_status=factor(remission_status,levels=c("Non-Remitter","Remitter")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,remission_status,actual_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*remission_status + timepoint*actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:remission_statusRemitter") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+p24a32pr_rsfc_remission_med <- map_dfr(roi_vars_p24a32pr,run_p24a32pr_remission_med) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+run_p24a32pr_remission_marker <- function(roi) {
+  dat <- smart_prepostrsfc_p24a32pr %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info,by="study_id") %>% left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           remission_status=factor(remission_status,levels=c("Non-Remitter","Remitter")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,remission_status,marker_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*remission_status + marker_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:remission_statusRemitter") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+p24a32pr_rsfc_remission_marker <- map_dfr(roi_vars_p24a32pr,run_p24a32pr_remission_marker) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+p24a32pr_rsfc_remission_compare <- p24a32pr_rsfc_remission_change_results %>%
+  select(region,beta_original=beta_interaction,p_original=p_value,pfdr_original=pfdr_hemi) %>%
+  left_join(p24a32pr_rsfc_remission_med %>%
+    select(region,beta_med=beta_interaction,p_med=p_value,pfdr_med=pfdr_hemi),by="region") %>%
+  left_join(p24a32pr_rsfc_remission_marker %>%
+    select(region,beta_marker=beta_interaction,p_marker=p_value,pfdr_marker=pfdr_hemi),by="region") %>%
+  arrange(pfdr_original)
+```
+
+#4.madrs change with rsfc
+##4.1 25
+```{r}
+run_25_percent_change_lmer <- function(roi) {
+
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value = all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id, percent_change), by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+           sex = factor(sex),
+           age_c = age - mean(age, na.rm = TRUE),
+           mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id,timepoint,percent_change,value,age_c,sex,mean_fd_c)
+  n_subjects <- n_distinct(dat$study_id)
+  n_complete <- dat %>%
+    distinct(study_id, timepoint) %>%
+    count(study_id) %>%
+    filter(n == 2) %>%
+    nrow()
+  if (n_complete < 8) {
+    return(tibble(region = roi,
+        n_subjects = n_subjects,
+        n_complete = n_complete,
+        beta_interaction = NA_real_,
+        t_value = NA_real_,
+        df = NA_real_,
+        p_value = NA_real_,
+        singular = NA))}
+
+  model <- lmerTest::lmer( value ~ timepoint * percent_change + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+
+  model_out <- broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:percent_change")
+
+  if (nrow(model_out) == 0) {
+    return(tibble(
+        region = roi,
+        n_subjects = n_subjects,
+        n_complete = n_complete,
+        beta_interaction = NA_real_,
+        t_value = NA_real_,
+        df = NA_real_,
+        p_value = NA_real_,
+        singular = lme4::isSingular(model)))}
+
+  model_out %>%
+    transmute(region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_interaction = estimate,
+      t_value = statistic,
+      df = df,
+      p_value = p.value,
+      singular = lme4::isSingular(model))
+}
+
+rsfc_25_percent_change_results <- map_dfr(roi_vars_25,run_25_percent_change_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(hemisphere, p_value)
+```
+###4.1.1 plot significant roi
+```{r}
+make_scatter_25 <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id,timepoint,value=all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id,percent_change) %>% distinct(study_id,.keep_all=TRUE), by="study_id") %>%
+    drop_na(value,percent_change) %>% pivot_wider(names_from=timepoint,values_from=value) %>%
+    mutate(rsfc_change=post-pre) %>% drop_na(rsfc_change)
+
+  ggplot(dat,aes(percent_change,rsfc_change)) +
+    geom_point(size=2.5,alpha=.7) + geom_smooth(method="lm",se=TRUE,linewidth=1) +
+    theme_classic() +
+    theme(axis.text=element_text(size=14),axis.title=element_text(size=14),
+          plot.title=element_text(size=14,face="bold",hjust=.5)) +
+    labs(title=roi %>% str_remove("_ROI$") %>% str_replace("^R_","Right ") %>% str_replace("^L_","Left "),
+         x="MADRS reduction (%)",y="Pre-to-post rsFC change")
+}
+
+p_TE1p <- make_scatter_25("R_TE1p_ROI")
+p_TE1m <- make_scatter_25("R_TE1m_ROI")
+
+ggsave("MADRS_sgACC_R_TE1p.png",p_TE1p,width=6,height=4,dpi=600)
+ggsave("MADRS_sgACC_R_TE1m.png",p_TE1m,width=6,height=4,dpi=600)
+```
+###4.1.2 plot brain maps
+```{r}
+glasser_atlas <- ggsegGlasser::glasser
+
+percentchange_25_brain_results <- rsfc_25_percent_change_results %>%
+  transmute(t_value, p_value, pfdr_hemi, parcel=str_remove(str_remove(region,"^[LR]_"),"_ROI$"),
+            label=if_else(str_detect(region,"^L_"),paste0("lh_L_",parcel),paste0("rh_R_",parcel)),
+            significant=pfdr_hemi < .05)
+
+plot_data <- glasser_atlas$data %>% left_join(percentchange_25_brain_results, by="label")
+t_limit <- max(abs(percentchange_25_brain_results$t_value), na.rm=TRUE)
+
+MADRSChange_sgACC <- ggplot() +
+  geom_sf(data=plot_data, aes(fill=t_value), colour="grey50", linewidth=.15) +
+  geom_sf(data=filter(plot_data,significant), fill=NA, colour="black", linewidth=.6) +
+  geom_sf(data=filter(plot_data,label %in% c("lh_L_25","rh_R_25")), fill="#008080", colour="#008080", linewidth=.8) +
+  scale_fill_gradient2(low="#2166AC",mid="white",high="#B2182B",midpoint=0,
+                       limits=c(-t_limit,t_limit),na.value="grey92",name="t statistic") +
+  labs(title="Pre-to-Post rsFC Change Differs by MADRS Change",
+       subtitle="Cortical connectivity with sgACC",
+       caption="Black outline: pFDR < .05\nTeal: sgACC seed (BA25)") +
+  theme_void() + theme(legend.position="bottom",plot.title=element_text(face="bold",hjust=.5),
+                       plot.subtitle=element_text(hjust=.5),plot.caption=element_text(hjust=.5))
+
+MADRSChange_sgACC
+
+ggsave("MADRSChange_sgACC.png", MADRSChange_sgACC,
+       width=10, height=6, units="in", dpi=600)
+```
+
+###4.1.3 covariate for meds and marker
+```{r}
+run_25_percent_change_med <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id,percent_change),by="study_id") %>%
+    left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,percent_change,actual_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*percent_change + timepoint*actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:percent_change") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_25_percent_change_med <- map_dfr(roi_vars_25,run_25_percent_change_med) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+run_25_percent_change_marker <- function(roi) {
+  dat <- smart_prepostrsfc_25 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id,percent_change),by="study_id") %>%
+    left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,percent_change,marker_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*percent_change + marker_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:percent_change") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_25_percent_change_marker <- map_dfr(roi_vars_25,run_25_percent_change_marker) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+rsfc_25_percent_change_compare <- rsfc_25_percent_change_results %>%
+  select(region,beta_original=beta_interaction,p_original=p_value,pfdr_original=pfdr_hemi) %>%
+  left_join(rsfc_25_percent_change_med %>%
+    select(region,beta_med=beta_interaction,p_med=p_value,pfdr_med=pfdr_hemi),by="region") %>%
+  left_join(rsfc_25_percent_change_marker %>%
+    select(region,beta_marker=beta_interaction,p_marker=p_value,pfdr_marker=pfdr_hemi),by="region") %>%
+  arrange(pfdr_original)
+```
+
+##4.2 PeEC, EC, Hipp, Pres
+```{r}
+roi_vars_PeEC <- names(smart_prepostrsfc_PeEC) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_p24a32pr %>% select(timepoint, value = all_of(.x))
+    any(!is.na(dat$value[dat$timepoint == "pre"])) &&
+      any(!is.na(dat$value[dat$timepoint == "post"]))})
+
+run_PeEC_percent_change_lmer <- function(roi) {
+
+  dat <- smart_prepostrsfc_PeEC %>%
+    select(study_id,timepoint,age,sex,mean_fd,value = all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id, percent_change), by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+           sex = factor(sex),
+           age_c = age - mean(age, na.rm = TRUE),
+           mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id,timepoint,percent_change,value,age_c,sex,mean_fd_c)
+  n_subjects <- n_distinct(dat$study_id)
+  n_complete <- dat %>%
+    distinct(study_id, timepoint) %>%
+    count(study_id) %>%
+    filter(n == 2) %>%
+    nrow()
+  if (n_complete < 8) {
+    return(tibble(region = roi,
+        n_subjects = n_subjects,
+        n_complete = n_complete,
+        beta_interaction = NA_real_,
+        t_value = NA_real_,
+        df = NA_real_,
+        p_value = NA_real_,
+        singular = NA))}
+
+  model <- lmerTest::lmer(value ~ timepoint * percent_change + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+
+  model_out <- broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:percent_change")
+
+  if (nrow(model_out) == 0) {
+    return(tibble(
+        region = roi,
+        n_subjects = n_subjects,
+        n_complete = n_complete,
+        beta_interaction = NA_real_,
+        t_value = NA_real_,
+        df = NA_real_,
+        p_value = NA_real_,
+        singular = lme4::isSingular(model)))}
+
+  model_out %>%
+    transmute(region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_interaction = estimate,
+      t_value = statistic,
+      df = df,
+      p_value = p.value,
+      singular = lme4::isSingular(model))
+}
+
+rsfc_PeEC_percent_change_results <- map_dfr(roi_vars_PeEC,run_PeEC_percent_change_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(hemisphere, p_value)
+```
+###4.2.1 covariate for med and marker
+```{r}
+roi_vars_PeEC <- names(smart_prepostrsfc_PeEC) %>%
+  keep(~str_detect(.x,"_ROI$")) %>%
+  keep(~{dat <- smart_prepostrsfc_PeEC %>% select(timepoint,value=all_of(.x))
+    any(!is.na(dat$value[dat$timepoint=="pre"])) && any(!is.na(dat$value[dat$timepoint=="post"]))})
+
+run_PeEC_percent_med <- function(roi) {
+  dat <- smart_prepostrsfc_PeEC %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id,percent_change),by="study_id") %>%
+    left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),actual_treatment=factor(actual_treatment),
+           sex=factor(sex),age_c=age-mean(age,na.rm=T),mean_fd_c=mean_fd-mean(mean_fd,na.rm=T)) %>%
+    drop_na(study_id,timepoint,percent_change,actual_treatment,value,age_c,sex,mean_fd_c)
+  model <- lmerTest::lmer(value ~ timepoint*percent_change + timepoint*actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+  broom.mixed::tidy(model,effects="fixed") %>% filter(term=="timepointpost:percent_change") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,p_value=p.value)
+}
+
+run_PeEC_percent_marker <- function(roi) {
+  dat <- smart_prepostrsfc_PeEC %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id,percent_change),by="study_id") %>%
+    left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),marker_treatment=factor(marker_treatment),
+           sex=factor(sex),age_c=age-mean(age,na.rm=T),mean_fd_c=mean_fd-mean(mean_fd,na.rm=T)) %>%
+    drop_na(study_id,timepoint,percent_change,marker_treatment,value,age_c,sex,mean_fd_c)
+  model <- lmerTest::lmer(value ~ timepoint*percent_change + marker_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+  broom.mixed::tidy(model,effects="fixed") %>% filter(term=="timepointpost:percent_change") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,p_value=p.value)
+}
+
+rsfc_PeEC_percent_med <- map_dfr(roi_vars_PeEC,run_PeEC_percent_med) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>% ungroup()
+
+rsfc_PeEC_percent_marker <- map_dfr(roi_vars_PeEC,run_PeEC_percent_marker) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>% ungroup()
+
+rsfc_PeEC_percent_compare <- rsfc_PeEC_percent_change_results %>%
+  select(region,beta_original=beta_interaction,p_original=p_value,pfdr_original=pfdr_hemi) %>%
+  left_join(rsfc_PeEC_percent_med %>%
+    select(region,beta_med=beta_interaction,p_med=p_value,pfdr_med=pfdr_hemi),by="region") %>%
+  left_join(rsfc_PeEC_percent_marker %>%
+    select(region,beta_marker=beta_interaction,p_marker=p_value,pfdr_marker=pfdr_hemi),by="region") %>%
+  arrange(pfdr_original)
+```
+
+##4.3 a24p32
+```{r}
+roi_vars_a24p32 <- names(smart_prepostrsfc_a24p32) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_a24p32 %>% select(timepoint, value = all_of(.x))
+    any(!is.na(dat$value[dat$timepoint == "pre"])) &&
+      any(!is.na(dat$value[dat$timepoint == "post"]))})
+
+run_a24p32_percent_change_lmer <- function(roi) {
+
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value = all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id, percent_change), by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+           sex = factor(sex),
+           age_c = age - mean(age, na.rm = TRUE),
+           mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id,timepoint,percent_change,value,age_c,sex,mean_fd_c)
+  n_subjects <- n_distinct(dat$study_id)
+  n_complete <- dat %>%
+    distinct(study_id, timepoint) %>%
+    count(study_id) %>%
+    filter(n == 2) %>%
+    nrow()
+  if (n_complete < 8) {
+    return(tibble(region = roi,
+        n_subjects = n_subjects,
+        n_complete = n_complete,
+        beta_interaction = NA_real_,
+        t_value = NA_real_,
+        df = NA_real_,
+        p_value = NA_real_,
+        singular = NA))}
+
+  model <- lmerTest::lmer(value ~ timepoint * percent_change + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+
+  model_out <- broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:percent_change")
+
+  if (nrow(model_out) == 0) {
+    return(tibble(
+        region = roi,
+        n_subjects = n_subjects,
+        n_complete = n_complete,
+        beta_interaction = NA_real_,
+        t_value = NA_real_,
+        df = NA_real_,
+        p_value = NA_real_,
+        singular = lme4::isSingular(model)))}
+
+  model_out %>%
+    transmute(region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_interaction = estimate,
+      t_value = statistic,
+      df = df,
+      p_value = p.value,
+      singular = lme4::isSingular(model))
+}
+
+rsfc_a24p32_percent_change_results <- map_dfr(roi_vars_a24p32,run_a24p32_percent_change_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(hemisphere, p_value)
+```
+
+###4.3.1 plot significant roi for madrs change
+```{r}
+roi <- "R_PGi_ROI"
+
+plot_dat <- smart_prepostrsfc_a24p32 %>%
+  select(study_id, timepoint, value = all_of(roi)) %>%
+  left_join(remission_info %>%
+      select(study_id, percent_change) %>%
+      distinct(study_id, .keep_all = TRUE), by = "study_id") %>%
+  mutate(timepoint = factor(timepoint, levels = c("pre", "post"))) %>%
+  drop_na(study_id, timepoint, value, percent_change) %>%
+  select(study_id, timepoint, value, percent_change) %>%
+  pivot_wider(names_from = timepoint,
+              values_from = value) %>%
+  mutate( rsfc_change = post - pre) %>%
+  drop_na(rsfc_change)
+
+ggplot(plot_dat, aes(x = percent_change, y = rsfc_change)) +
+  geom_point(size = 2.5, alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1) +
+  theme_classic(base_size = 11) +
+  labs( title = paste0( "Seed a24/p32 rsFC Change and MADRS Improvement: ", roi),
+    x = "MADRS reduction (%)",
+    y = "Pre-to-post rsFC change")
+
+
+roi <- "R_TE1m_ROI"
+
+plot_dat <- smart_prepostrsfc_a24p32 %>%
+  select(study_id, timepoint, value = all_of(roi)) %>%
+  left_join(remission_info %>%
+      select(study_id, percent_change) %>%
+      distinct(study_id, .keep_all = TRUE), by = "study_id") %>%
+  mutate(timepoint = factor(timepoint, levels = c("pre", "post"))) %>%
+  drop_na(study_id, timepoint, value, percent_change) %>%
+  select(study_id, timepoint, value, percent_change) %>%
+  pivot_wider(names_from = timepoint,
+              values_from = value) %>%
+  mutate( rsfc_change = post - pre) %>%
+  drop_na(rsfc_change)
+
+ggplot(plot_dat, aes(x = percent_change, y = rsfc_change)) +
+  geom_point(size = 2.5, alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1) +
+  theme_classic(base_size = 11) +
+  labs( title = paste0( "Seed a24/p32 rsFC Change and MADRS Improvement: ", roi),
+    x = "MADRS reduction (%)",
+    y = "Pre-to-post rsFC change")
+
+roi <- "R_PHT_ROI"
+
+plot_dat <- smart_prepostrsfc_a24p32 %>%
+  select(study_id, timepoint, value = all_of(roi)) %>%
+  left_join(remission_info %>%
+      select(study_id, percent_change) %>%
+      distinct(study_id, .keep_all = TRUE), by = "study_id") %>%
+  mutate(timepoint = factor(timepoint, levels = c("pre", "post"))) %>%
+  drop_na(study_id, timepoint, value, percent_change) %>%
+  select(study_id, timepoint, value, percent_change) %>%
+  pivot_wider(names_from = timepoint,
+              values_from = value) %>%
+  mutate( rsfc_change = post - pre) %>%
+  drop_na(rsfc_change)
+
+ggplot(plot_dat, aes(x = percent_change, y = rsfc_change)) +
+  geom_point(size = 2.5, alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1) +
+  theme_classic(base_size = 11) +
+  labs( title = paste0( "Seed a24/p32 rsFC Change and MADRS Improvement: ", roi),
+    x = "MADRS reduction (%)",
+    y = "Pre-to-post rsFC change")
+```
+
+###4.3.2 covariate for med and marker
+```{r}
+run_a24p32_percent_change_med <- function(roi) {
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id,percent_change),by="study_id") %>%
+    left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,percent_change,actual_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*percent_change + timepoint*actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:percent_change") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_a24p32_percent_change_med <- map_dfr(roi_vars_a24p32,run_a24p32_percent_change_med) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+run_a24p32_percent_change_marker <- function(roi) {
+  dat <- smart_prepostrsfc_a24p32 %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id,percent_change),by="study_id") %>%
+    left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,percent_change,marker_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*percent_change + marker_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:percent_change") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_a24p32_percent_change_marker <- map_dfr(roi_vars_a24p32,run_a24p32_percent_change_marker) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+rsfc_a24p32_percent_change_compare <- rsfc_a24p32_percent_change_results %>%
+  select(region,beta_original=beta_interaction,p_original=p_value,pfdr_original=pfdr_hemi) %>%
+  left_join(rsfc_a24p32_percent_change_med %>%
+    select(region,beta_med=beta_interaction,p_med=p_value,pfdr_med=pfdr_hemi),by="region") %>%
+  left_join(rsfc_a24p32_percent_change_marker %>%
+    select(region,beta_marker=beta_interaction,p_marker=p_value,pfdr_marker=pfdr_hemi),by="region") %>%
+  arrange(pfdr_original)
+```
+
+
+##4.4 p24a32pr
+```{r}
+roi_vars_p24a32pr <- names(smart_prepostrsfc_p24a32pr) %>%
+  keep(~ str_detect(.x, "_ROI$")) %>%
+  keep(~ {dat <- smart_prepostrsfc_p24a32pr %>% select(timepoint, value = all_of(.x))
+    any(!is.na(dat$value[dat$timepoint == "pre"])) &&
+      any(!is.na(dat$value[dat$timepoint == "post"]))})
+
+run_p24a32pr_percent_change_lmer <- function(roi) {
+
+  dat <- smart_prepostrsfc_p24a32pr %>%
+    select(study_id,timepoint,age,sex,mean_fd,value = all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id, percent_change), by = "study_id") %>%
+    mutate(timepoint = factor(timepoint, levels = c("pre", "post")),
+           sex = factor(sex),
+           age_c = age - mean(age, na.rm = TRUE),
+           mean_fd_c = mean_fd - mean(mean_fd, na.rm = TRUE)) %>%
+    drop_na(study_id,timepoint,percent_change,value,age_c,sex,mean_fd_c)
+  n_subjects <- n_distinct(dat$study_id)
+  n_complete <- dat %>%
+    distinct(study_id, timepoint) %>%
+    count(study_id) %>%
+    filter(n == 2) %>%
+    nrow()
+  if (n_complete < 8) {
+    return(tibble(region = roi,
+        n_subjects = n_subjects,
+        n_complete = n_complete,
+        beta_interaction = NA_real_,
+        t_value = NA_real_,
+        df = NA_real_,
+        p_value = NA_real_,
+        singular = NA))}
+
+  model <- lmerTest::lmer(value ~ timepoint * percent_change + age_c + sex + mean_fd_c + (1 | study_id), data = dat)
+
+  model_out <- broom.mixed::tidy(model, effects = "fixed") %>%
+    filter(term == "timepointpost:percent_change")
+
+  if (nrow(model_out) == 0) {
+    return(tibble(
+        region = roi,
+        n_subjects = n_subjects,
+        n_complete = n_complete,
+        beta_interaction = NA_real_,
+        t_value = NA_real_,
+        df = NA_real_,
+        p_value = NA_real_,
+        singular = lme4::isSingular(model)))}
+
+  model_out %>%
+    transmute(region = roi,
+      n_subjects = n_subjects,
+      n_complete = n_complete,
+      beta_interaction = estimate,
+      t_value = statistic,
+      df = df,
+      p_value = p.value,
+      singular = lme4::isSingular(model))
+}
+
+rsfc_p24a32pr_percent_change_results <- map_dfr(roi_vars_p24a32pr,run_p24a32pr_percent_change_lmer) %>%
+  mutate(hemisphere = case_when(str_detect(region, "^L_") ~ "Left", str_detect(region, "^R_") ~ "Right", TRUE ~ "Other")) %>%
+  group_by(hemisphere) %>%
+  mutate(pfdr_hemi = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(hemisphere, p_value)
+```
+###4.4.1 covariate for med and marker
+```{r}
+run_p24a32pr_percent_change_med <- function(roi) {
+  dat <- smart_prepostrsfc_p24a32pr %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id,percent_change),by="study_id") %>%
+    left_join(treatment_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           actual_treatment=factor(actual_treatment,levels=c("SER","BUP")),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,percent_change,actual_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*percent_change + timepoint*actual_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:percent_change") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_p24a32pr_percent_change_med <- map_dfr(roi_vars_p24a32pr,run_p24a32pr_percent_change_med) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+run_p24a32pr_percent_change_marker <- function(roi) {
+  dat <- smart_prepostrsfc_p24a32pr %>%
+    select(study_id,timepoint,age,sex,mean_fd,value=all_of(roi)) %>%
+    left_join(remission_info %>% select(study_id,percent_change),by="study_id") %>%
+    left_join(marker_info,by="study_id") %>%
+    mutate(timepoint=factor(timepoint,levels=c("pre","post")),
+           marker_treatment=factor(marker_treatment),sex=factor(sex),
+           age_c=age-mean(age,na.rm=TRUE),mean_fd_c=mean_fd-mean(mean_fd,na.rm=TRUE)) %>%
+    drop_na(study_id,timepoint,percent_change,marker_treatment,value,age_c,sex,mean_fd_c)
+
+  model <- lmerTest::lmer(value ~ timepoint*percent_change + marker_treatment +
+                            age_c + sex + mean_fd_c + (1|study_id),data=dat)
+
+  broom.mixed::tidy(model,effects="fixed") %>%
+    filter(term=="timepointpost:percent_change") %>%
+    transmute(region=roi,beta_interaction=estimate,t_value=statistic,df=df,p_value=p.value)
+}
+
+rsfc_p24a32pr_percent_change_marker <- map_dfr(roi_vars_p24a32pr,run_p24a32pr_percent_change_marker) %>%
+  mutate(hemisphere=case_when(str_detect(region,"^L_")~"Left",
+                              str_detect(region,"^R_")~"Right",TRUE~"Other")) %>%
+  group_by(hemisphere) %>% mutate(pfdr_hemi=p.adjust(p_value,"BH")) %>%
+  ungroup() %>% arrange(hemisphere,p_value)
+
+rsfc_p24a32pr_percent_change_compare <- rsfc_p24a32pr_percent_change_results %>%
+  select(region,beta_original=beta_interaction,p_original=p_value,pfdr_original=pfdr_hemi) %>%
+  left_join(rsfc_p24a32pr_percent_change_med %>%
+    select(region,beta_med=beta_interaction,p_med=p_value,pfdr_med=pfdr_hemi),by="region") %>%
+  left_join(rsfc_p24a32pr_percent_change_marker %>%
+    select(region,beta_marker=beta_interaction,p_marker=p_value,pfdr_marker=pfdr_hemi),by="region") %>%
+  arrange(pfdr_original)
+```
+
+#supplementary table - sensitivity analysis
+```{r}
+comparisons <- list(
+  "Pre-post" = list(
+    sgACC = rsfc_prepost_25_compare,
+    pgACC = rsfc_prepost_a24p32_compare,
+    dACC = rsfc_prepost_p24a32pr_compare,
+    "Hippocampal formation" = rsfc_prepost_PeEC_compare),
+  "Response" = list(
+    sgACC = rsfc_25_responder_change_withmarker_compare,
+    pgACC = a24p32_rsfc_responder_change_withmarker_compare,
+    dACC = rsfc_p24a32pr_responder_change_withmarker_compare,
+    "Hippocampal formation" = PeEC_rsfc_responder_compare),
+  "Remission" = list(
+    sgACC = rsfc_25_remission_withmarker_compare,
+    pgACC = a24p32_rsfc_remission_compare,
+    dACC = p24a32pr_rsfc_remission_compare,
+    "Hippocampal formation" = PeEC_rsfc_remission_compare),
+  "MADRS change" = list(
+    sgACC = rsfc_25_percent_change_compare,
+    pgACC = rsfc_a24p32_percent_change_compare,
+    dACC = rsfc_p24a32pr_percent_change_compare,
+    "Hippocampal formation" = rsfc_PeEC_percent_compare))
+
+sensitivity_table <- imap_dfr(comparisons, \(seeds, analysis)
+  imap_dfr(seeds, \(x, seed)
+    x %>% ungroup() %>%
+      transmute(
+        Analysis = analysis, Seed = seed, Region = region,
+        `Original β` = beta_original, `Original pFDR` = pfdr_original,
+        `Medication β` = beta_med, `Medication pFDR` = pfdr_med,
+        `Marker β` = beta_marker, `Marker pFDR` = pfdr_marker))) %>%
+  filter(if_any(contains("pFDR"), ~ !is.na(.x) & .x < .05)) %>%
+  arrange(Analysis, Seed, `Original pFDR`)
+
+note <- paste(
+  "Note. Regions surviving FDR correction (pFDR < .05) in at least one model",
+  "are shown. Medication received and marker assignment (BUP, SER, Both,",
+  "or Neither) were examined separately. No significant effects were",
+  "observed for the hippocampal formation.")
+
+supp_table <- sensitivity_table %>%
+  gt(groupname_col = "Analysis") %>%
+  tab_spanner("Primary Model", c(`Original β`, `Original pFDR`)) %>%
+  tab_spanner("Medication-Adjusted", c(`Medication β`, `Medication pFDR`)) %>%
+  tab_spanner("Marker-Adjusted", c(`Marker β`, `Marker pFDR`)) %>%
+  fmt_number(columns = c(contains("β"), contains("pFDR")), decimals = 3) %>%
+  tab_header(
+    title = md("**Supplementary Table X**"),
+    subtitle = "Sensitivity analyses adjusting for medication received and marker assignment") %>%
+  tab_source_note(md(note))
+
+supp_table
+
+tab <- sensitivity_table %>%
+  mutate(Region = gsub("_", " ", sub("_ROI$", "", Region))) %>%
+  mutate(across(c(contains("β"), contains("pFDR")), ~ round(.x, 3)))
+
+ft <- flextable(tab) %>%
+  add_header_row(
+    values = c("", "", "", "Primary Model", "Medication-Adjusted", "Marker-Adjusted"),
+    colwidths = c(1, 1, 1, 2, 2, 2)) %>%
+  set_header_labels(values = setNames(
+    rep(c("β", "pFDR"), 3), names(tab)[4:9])) %>%
+  merge_v(j = "Analysis") %>%
+  valign(j = "Analysis", valign = "top") %>%
+  align(j = 1:3, align = "left", part = "all") %>%
+  align(j = 4:9, align = "center", part = "all") %>%
+  fontsize(size = 9, part = "all") %>%
+  padding(padding = 3, part = "all") %>%
+  theme_booktabs() %>%
+  bold(part = "header") %>%
+  autofit()
+
+doc <- read_docx() %>%
+  body_add_par("Supplementary Table X", style = "heading 1") %>%
+  body_add_par(
+    "Sensitivity analyses adjusting for medication received and marker assignment") %>%
+  body_add_flextable(ft) %>%
+  body_add_par(note) %>%
+  body_set_default_section(value = prop_section(
+    page_size = page_size(orient = "landscape"),
+    page_margins = page_mar(top = .5, bottom = .5, left = .5, right = .5)))
+
+print(doc, target = "~/Desktop/Supplementary_Table_X.docx")
+```
+
