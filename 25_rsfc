@@ -1,0 +1,50 @@
+clear
+
+mat_files = {'FC_measures_SMARTJune2026_ses01.mat', 'FC_measures_SMARTJune2026_ses02.mat'};
+sessions = {'ses01', 'ses02'};
+
+seed_rois = [164 344];
+seed_labels = {'L_25_ROI'; 'R_25_ROI'};
+
+out_dir = fullfile(pwd,'csv_exports');
+if ~exist(out_dir,'dir')
+    mkdir(out_dir);
+end
+
+for s = 1:2
+    S = load(mat_files{s});
+
+    assert(isfield(S,'Fnetmats_all'), 'Fnetmats_all missing in %s.',mat_files{s});
+
+    n = size(S.Fnetmats_all,1);
+    p = size(S.Fnetmats_all,3);
+
+    assert(size(S.Fnetmats_all,2) == 360 && p == 360, 'Expected subjects x 360 x 360.');
+    assert(isfield(S,'subjects') && isstruct(S.subjects) && isfield(S.subjects,'name'), 'Subject names missing.');
+    assert(numel(S.subjects) == n, 'Subject count does not match FC rows.');
+    assert(isfield(S,'mean_fd') && numel(S.mean_fd) == n, 'mean_fd missing or incorrect length.');
+
+    study_id = string({S.subjects.name})';
+    assert(numel(unique(study_id)) == n, 'Duplicate subject IDs found.');
+
+    Seed_FC = nan(n,p);
+    for i = 1:n
+        x = reshape(S.Fnetmats_all(i,seed_rois,:),2,p);
+        Seed_FC(i,:) = mean(x,1,'omitnan');
+    end
+
+    target_names = arrayfun(@(j) sprintf('ROI_%03d',j),1:p,'UniformOutput',false);
+
+    T = table(study_id);
+    T = [T array2table(Seed_FC,'VariableNames',target_names)];
+    T.mean_fd = S.mean_fd(:);
+
+    prefix = ['SMARTJune2026_' sessions{s} '_seed5_bilateral_25'];
+    out_file = fullfile(out_dir,[prefix '_to_cortex_fc.csv']);
+    writetable(T,out_file);
+
+    D = table(seed_labels,seed_rois','VariableNames',{'seed_label','Fnetmats_all_ROI_index'});
+    writetable(D,fullfile(out_dir,[prefix '_seed_definition.csv']));
+
+    fprintf('Wrote %s: %d subjects\n',out_file,n);
+end
